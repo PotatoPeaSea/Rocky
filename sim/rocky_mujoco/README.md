@@ -1,0 +1,253 @@
+# Rocky pentapod: MuJoCo simulation
+
+This is a MuJoCo model of Rocky (5 legs × 3 HX-30HM servos) built from the v5 Fusion model. It comes with:
+
+- a classical IK gait,
+- a Gymnasium RL environment with domain randomisation,
+- CPU PPO training (Stable-Baselines3, works on Windows),
+- a GPU path (MJX + Brax / MuJoCo Playground) for Linux or WSL2.
+
+![stand](media/stand_iso.png)
+
+| File | What it is |
+|---|---|
+| `rocky.xml` | Robot MJCF. **Generated** by `build_model.py`; edit the script, not the XML. |
+| `scene.xml` / `scene_rough.xml` | Floor, light and sky. The rough scene has a heightfield with bumps up to 2.5 cm and a flat start pad. |
+| `meshes/` | Link-frame STLs in metres, exported read-only from Fusion, plus `massprops.json` (the mass model). |
+| `build_model.py` | Mass model and servo parameters. Writes `rocky.xml` and `scene_rough.xml`. `--fusion-export DIR` re-processes raw Fusion STLs. |
+| `rocky_kinematics.py` | Per-leg FK/IK, joint limits and the stand pose. Matches the MJCF to 1e-7 m. |
+| `view.py` | Interactive viewer with servo sliders and keyframes. |
+| `gait_demo.py` | Open-loop wave or ripple gait from leg IK at 50 Hz. This is the classical-control starting point. |
+| `rocky_env.py` | Gymnasium env `Rocky-v0` (velocity-command tracking). |
+| `train_ppo.py` / `play_policy.py` | SB3 PPO on the CPU, then view or evaluate a policy. |
+| `rocky_mjx_env.py` / `train_mjx.py` | MuJoCo Playground-style JAX env and Brax PPO for the GPU. |
+| `verify_model.py` | Model sanity checks: mass, limits, FK, 10 s stand, drop and thrash test. |
+| `make_media.py` | Renders `media/` offscreen. |
+
+## Install (Windows, CPU)
+
+```powershell
+cd C:\Users\smart\Documents\Pentapod\sim\rocky_mujoco
+py -3.12 -m venv .venv            # Python 3.10-3.13 all work
+.venv\Scripts\activate
+pip install -r requirements.txt   # mujoco, gymnasium, stable-baselines3 (+ CPU torch), imageio
+python verify_model.py            # should end with ALL PASS
+```
+
+## View
+
+```powershell
+python view.py            # starts standing; right panel "Control" = one slider per servo (s01..s15)
+python view.py --hang     # gravity off, body lifted: pose the legs with the sliders
+python view.py --rough
+```
+
+- To load a keyframe, open the left panel, go to Simulation > Key, pick `stand` or `zero`, then click Load key.
+- Rendering > Group enable toggles what is shown: 1 = dome, 2 = parts, 3 = collision shapes, 4 = sites (IMU, feet).
+
+## Classical gait
+
+```powershell
+python gait_demo.py                          # wave gait (1 leg in the air), 6 cm/s toward leg 1 (+y)
+python gait_demo.py --gait ripple --vy 0.12  # 2 non-adjacent legs swing together
+python gait_demo.py --vx 0.08 --vy 0         # sideways relative to leg 1
+python gait_demo.py --vy 0 --wz 0.4          # turn on the spot
+python gait_demo.py --headless --seconds 12  # prints the measured speed and tilt
+```
+
+`WaveGait.feet(t, cmd)` → `rocky_kinematics.ik_all()` → 15 targets is the same loop you would run on the Pi or ESP32. The swing order is 1 → 4 → 2 → 5 → 3, so two neighbouring legs are never in the air at the same time. Nothing reads the IMU yet; body levelling is a good first closed-loop project.
+
+## RL training (CPU)
+
+```powershell
+python train_ppo.py --steps 300000 --n-envs 4          # sanity run (~8 min on 2 cores)
+python train_ppo.py                                    # default 10 M steps; leave it overnight
+python train_ppo.py --residual gait --name ppo_gait    # learn corrections on top of the wave gait
+python play_policy.py runs\ppo_rocky\latest.zip        # watch it; --cmd 0 0.08 0 to steer
+python play_policy.py runs\ppo_rocky\latest.zip --eval # headless score on 6 fixed commands
+python play_policy.py zero --eval                      # baseline: just stand (or --residual gait: just the gait)
+```
+
+- Training writes checkpoints, `latest.zip`, `vecnormalize.pkl` and `progress.csv` to `runs/<name>/`. The CSV includes every reward term as `terms/*`.
+- If you `pip install tensorboard`, you can watch training with `tensorboard --logdir runs`.
+- From-scratch locomotion (`--residual stand`) usually needs tens of millions of steps. On a CPU that is overnight; on a GPU (below) it takes minutes.
+- `--residual gait` starts out already walking, so you can see results with far less compute.
+
+### Environment interface (mirrors the real robot)
+
+- **Control:** 50 Hz (`control_dt = 0.02`), with 10 physics steps of 2 ms each.
+- **Action** (15 values, range ±1): `target = q_ref + 0.35 rad × action`, clipped to the joint limits.
+  - `q_ref` is the stand pose, or the open-loop gait with `--residual gait`.
+  - Action index *i* is servo ID *i*+1.
+- **Observation** (54 values; 56 in gait mode, which adds the gait phase as sin/cos):
+
+  | Index | Content |
+  |---|---|
+  | 0–2 | gyro (rad/s) |
+  | 3–5 | gravity direction in the body frame (from the IMU quaternion) |
+  | 6–20 | joint position − stand pose (quantised to the 12-bit encoder, plus calibration offset) |
+  | 21–35 | joint velocity (finite difference of the reported positions) |
+  | 36–50 | last action |
+  | 51–53 | command (vx, vy, wz) |
+
+  Accelerometer, true body velocity and foot contacts are in `info`.
+- **Reward:** the `REWARD_SCALES` in `rocky_env.py`, all multiplied by dt:
+  - tracking of xy velocity and yaw rate (exponential kernels);
+  - penalties on vertical velocity, roll/pitch rate, tilt, body height, torque², joint velocity², action rate, joint-limit proximity, and leg or self collisions;
+  - foot air-time reward, an alive bonus, and −50 on a fall.
+- **Termination** happens when any of these is true: the dome or chassis touches the ground, tilt exceeds 60°, or the body is below 3 cm. Episodes are truncated at 20 s, and the command is resampled every 10 s.
+- **Domain randomisation** (`DEFAULT_DR`):
+
+  | Parameter | Range |
+  |---|---|
+  | foot/floor friction | ×0.5 to ×1.25 |
+  | added base mass | −0.15 to +0.35 kg |
+  | CoM shift | ±15 mm |
+  | servo kp | ×0.75 to ×1.25 |
+  | battery voltage | 9.9 to 12.6 V (scales stall torque and gain) |
+  | joint damping | ×0.8 to ×1.2 |
+  | gear friction | ×0.5 to ×2 |
+  | per-servo zero offset | ±1.5° |
+  | actuation latency | 0 to 12 ms |
+  | observation noise | on |
+  | velocity kicks | ±0.15 m/s every ~4 s |
+
+## GPU training (Linux or WSL2 with an NVIDIA GPU)
+
+```bash
+# in WSL2 Ubuntu (the Windows NVIDIA driver is enough; no CUDA install needed on the Windows side)
+python3 -m venv ~/rocky && source ~/rocky/bin/activate
+pip install "jax[cuda12]==0.9.2" mujoco mujoco-mjx playground brax mediapy   # jax 0.12 breaks brax 0.14.2
+cd /mnt/c/Users/smart/Documents/Pentapod/sim/rocky_mujoco
+python train_mjx.py --smoke                                  # compile check
+python train_mjx.py --num-timesteps 100000000 --num-envs 4096 # or --impl warp on RTX 30/40/50
+```
+
+- `rocky_mjx_env.RockyJoystick` uses the same robot, the same 50 Hz interface, observations and reward as the CPU env.
+- Simplifications for speed:
+  - only the foot spheres collide with the floor, and falls are detected from tilt and height;
+  - there is no encoder quantisation or latency buffer;
+  - the physics step is 4 ms.
+- The critic gets privileged observations: true body velocity and height.
+
+## Joint, actuator and servo map
+
+The leg angle is measured from body +x, counter-clockwise when seen from above. Leg 1 points along body +y; this is the Fusion model frame.
+
+| Leg | Angle | Hip (yaw) | Femur (pitch) | Knee (pitch) |
+|---|---|---|---|---|
+| 1 | 90° | ID 1 `s01_leg1_hip` | ID 2 `s02_leg1_femur` | ID 3 `s03_leg1_knee` |
+| 2 | 162° | ID 4 `s04_leg2_hip` | ID 5 `s05_leg2_femur` | ID 6 `s06_leg2_knee` |
+| 3 | 234° | ID 7 `s07_leg3_hip` | ID 8 `s08_leg3_femur` | ID 9 `s09_leg3_knee` |
+| 4 | 306° | ID 10 `s10_leg4_hip` | ID 11 `s11_leg4_femur` | ID 12 `s12_leg4_knee` |
+| 5 | 18° | ID 13 `s13_leg5_hip` | ID 14 `s14_leg5_femur` | ID 15 `s15_leg5_knee` |
+
+- Joints are named `leg{n}_hip`, `leg{n}_femur` and `leg{n}_knee`. Actuators are `s{ID}_leg{n}_{joint}`. Sensors are `q_*`, `dq_*` and `tau_*`, plus `imu_quat`, `imu_gyro`, `imu_acc` and `leg{n}_foot_touch`.
+- Angles are in radians. q = 0 is the CAD pose: coxa radial, femur horizontal, tibia vertical.
+- The sign convention is `+hip` = counter-clockwise from above, `+femur` = up, `+knee` = foot moves inward.
+- **On the real robot**, measure each servo's sign and its raw reading at q = 0 once. After that, `raw = zero_raw + sign × q / resolution`.
+
+| Joint | Limit | Source |
+|---|---|---|
+| hip | ±75° | v5 notes |
+| femur | −45° (down) to +85° (up) | Down is from the v5 notes. Up: the notes say "free at yaw 0"; I swept the femur and knee-servo meshes and they hit the dome at about +93° at yaw 0, so the limit is +85° for margin. At large hip yaw the femur meets the dome sooner; the dome's collision hull models this. |
+| knee | −60° (out) to +75° (in) | Inward is from the v5 notes. **Outward −60° is my assumption.** |
+
+- The **stand pose** puts each foot centre 220 mm out from the body axis and 81 mm below the plate mid-plane. That gives a body height of 91 mm and 55 mm of ground clearance under the battery tray.
+  - Femur +23.9°, knee +28.6°, hip 0°.
+  - The femur holds 0.28 N·m while standing (stall torque is 2.94 N·m).
+
+## Assumptions (mass and servo)
+
+| Item | Value | Source / method |
+|---|---|---|
+| HX-30HM servo | **52 g** each (15 total) | Spec ([openelab / Hiwonder listing](https://openelab.io/products/hx-30hm-bus-servo)). Placed at the STEP model's centroid. |
+| Torque | **2.94 N·m** (30 kg·cm @ 11.1 V), used as the stall-torque clip | Same listing. It is quoted as the rated torque; no separate stall figure is published. |
+| No-load speed | **5.51 rad/s** (0.19 s/60° @ 11.1 V) | Same listing |
+| Encoder | 12-bit (360°/4096 = 0.088°), 0.3° accuracy, 1 Mbaud bus | Same listing. The brief's 0.24° is the LX-series value; change `ENCODER_RES` in `rocky_env.py` if your servos report coarser. |
+| Servo model | Voltage-mode P servo: `τ = clip(kp·(target − q), ±τ_stall) − kv·q̇`, with kp = 30 N·m/rad (saturates at 5.6° error) and kv = τ_stall/ω_noload = 0.533 N·m·s/rad | The kv (back-EMF) term is the joint damping, so the torque-speed line τ_max(ω) = τ_stall(1 − ω/ω₀) and the 5.5 rad/s speed limit come out of the physics. **kp is an estimate; fit it from a step response.** |
+| Armature | 0.004 kg·m² | Estimated: rotor about 5e-8 kg·m² × gear ratio² (about 285²) |
+| Gear friction | 0.03 N·m Coulomb | Estimate |
+| Printed parts | CAD volume × 1.24 g/cc (PLA) × **0.80 fill factor** (dome × 0.95) | Volumes from Fusion; the mesh volumes agree to 0.3 %. Coxa 39.9 g, femur 37.1 g, tibia 41.8 g, chassis (plates, standoffs, tray, posts, deck) 397.9 g, dome 203.7 g. |
+| Foot | TPU 1.21 g/cc × 0.9 → 5.4 g | |
+| Fasteners | 4 g per leg link, 25 g in the base | Estimate |
+| Battery | 188 g, 3S 2200 mAh | Typical 25–30C pack, CAD volume |
+| Raspberry Pi 5 + Active Cooler | 46 g + 21 g | Box over the CAD bounding box |
+| Control PCB (v6) | 65 g, a 75 × 75 × 12 mm box on the top plate (old WAGO hub spot) | Mid-point of 50–80 g; **move it in `build_model.py` once the PCB placement is fixed** |
+| Wiring, XT60, fuse | 60 g, spread around the plate | Estimate |
+| Magnets, tie rods | 38.3 g | Fusion (steel) |
+| **Total** | **2.507 kg**: base 1.305 kg; per leg: coxa 95.9 g, femur 93.1 g, tibia 51.3 g | |
+
+- Not included: the old v5 electronics (ESP32, BusLinker, Pololu, LM2596, WAGO hub), which v6 removes.
+- The IMU site uses the v5 BNO085 location (−48.3, 41.45, 60.5 mm). If the IMU moves to the PCB, move `site name="imu"`.
+
+### Contact
+
+- Feet are 10 mm spheres with friction 1.0 (TPU), `solref 0.006 1`.
+- Everything else uses friction 0.6.
+- Body collision uses the convex hulls of the chassis and the dome cap. Legs use boxes and capsules. Leg-to-leg self-collision is on.
+- Solver settings: `implicitfast`, 2 ms timestep, pyramidal cone.
+
+## Verification (run in the Linux container, MuJoCo 3.16.0)
+
+- `verify_model.py`: **ALL PASS**.
+  - Total mass is 2.507 kg, and the joint ranges match the table.
+  - FK matches the MuJoCo foot sites to < 1e-7 m over 300 random poses, and IK(FK) round-trips.
+  - The model starts with no contacts.
+  - It stands for 10 s with 0.00 mm drift and 0.00° tilt; it settles 0.8 mm, with 0.07 mm of foot penetration and only the 5 feet in contact.
+  - After a 25 cm drop and 8 s of random 2 Hz targets: no NaNs or warnings, max |q̇| 6 rad/s.
+- Gait demo, headless, 12 s, flat ground:
+
+  | Gait | Command | Measured | Max tilt |
+  |---|---|---|---|
+  | wave | vy 0.06 m/s | 0.0625 m/s | 0.3° |
+  | ripple | vy 0.06 m/s | 0.0615 m/s | 0.2° |
+  | ripple | vx 0.08 m/s | 0.0822 m/s | 0.3° |
+  | ripple, 0.8 s period | vy 0.15 m/s | 0.154 m/s | 0.3° |
+  | wave | wz 0.4 rad/s | 0.404 rad/s | 0.4° |
+  | wave, rough terrain, 30 s | vy 0.06 m/s | 0.062 m/s | 2.6° |
+
+  It stayed upright in every run.
+- `gymnasium.utils.env_checker.check_env` passes in both modes. The env runs at about 1.4 k steps/s on one core with domain randomisation on.
+- PPO sanity runs (2 envs, 300 k steps, about 8 min each on a 2-core CPU) are in [Training sanity results](#training-sanity-results).
+
+## Training sanity results
+
+Both runs used 2 envs, 300 k steps, domain randomisation on, and `python train_ppo.py --steps 300000 --n-envs 2`.
+
+| Run | ep_rew_mean, start → end | Throughput |
+|---|---|---|
+| `--residual stand` | 17.9 → 19.7 (rising, std 0.20 → 0.18) | ~620 steps/s |
+| `--residual gait` | 19.0 → 23.1 (+21 %) | ~510 steps/s |
+
+`play_policy.py --eval` scores (deterministic, 6 fixed commands, DR off), compared with their baselines:
+
+| Policy | Mean return | Baseline (same mode, zero action) | What it does |
+|---|---|---|---|
+| stand-mode PPO | 24.29 | 24.33 (just standing) | It has learned to stand still. |
+| gait-mode PPO | 26.7 | 31.0 (the gait alone) | Worse than the gait it starts from. |
+
+- **What this shows:** the pipeline works, and the stochastic training return goes up in both modes.
+- **What it does not show:** a learned gait. 300 k steps is far too few for one to emerge, and neither policy yet beats its hand-written baseline.
+- **Next step:** run 10–50 M steps (overnight on CPU, or minutes with `train_mjx.py` on a GPU).
+- If the policy settles on standing still, the usual fixes are:
+  - raise `tracking_lin_vel`;
+  - add a "stand still" penalty for a non-zero command;
+  - use a curriculum on command size.
+
+`train_mjx.py --smoke` (CPU, JAX backend, 32 envs, 20 k steps) compiled and trained end to end. Eval reward went from 6.2 to 7.2, and `params.pkl` was saved. Rendering a rollout through `env.render` with EGL also worked.
+
+## Not tested / known gaps
+
+- The Windows install and the interactive viewer (`view.py`, the gait demo without `--headless`) were not run here, because the container has no display. The same code paths ran headless.
+- The GPU path was only smoke-tested on CPU with the JAX backend (see above). It was not run on a GPU, and the Warp backend was not tried.
+- Servo kp, armature and friction are estimates. Fit them from a step response logged on the bench: command a step and read positions back at 1 Mbaud.
+- Backlash is not modelled. The latency, calibration-offset and encoder-quantisation hooks are in `rocky_env.py`.
+- The v6 control-PCB placement and IMU location are guesses.
+- The knee outward limit is assumed.
+
+## Rebuilding from Fusion
+
+1. Export the meshes with a read-only Fusion script (mesh calculator → binary STL, world frame, mm) to `Documents\Pentapod\sim\meshes_export\`. That is how the current meshes were made, from the "Pentapod Walker v5" document; the v6 mechanical geometry is identical.
+2. Run `python build_model.py --fusion-export <that folder>`, which needs `pip install trimesh fast-simplification`.
+3. Run `python verify_model.py`.
