@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "rocky_ctrl")(type "KiCad")(uri "${KIPRJMOD}/rocky_ctrl.kicad_sym")(options "")(descr "Rocky custom symbols"))
+)
