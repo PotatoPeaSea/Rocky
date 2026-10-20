@@ -2,6 +2,7 @@
 
     python build_model.py                         # rewrite rocky.xml from meshes/massprops.json
     python build_model.py --fusion-export DIR     # also re-process raw STLs exported from Fusion
+    python build_model.py --camera-export DIR     # re-process only the v7 camera + mount STLs
 
 The raw STLs (DIR) were exported read-only from the "Pentapod Walker v5" Fusion document
 (world frame, mm, leg 1 instance). This script moves each part into its MuJoCo link frame,
@@ -38,6 +39,7 @@ MASS_ASSUMPTIONS = {
     "control_pcb": 65.0,            # new v6 control PCB (spec'd 50-80 g), placed at the old hub
     "wiring_misc": 60.0,            # servo leads, XT60s, fuse, loop key, zip ties
     "base_fasteners": 25.0,
+    "oakd_lite": 61.0,              # Luxonis OAK-D Lite, datasheet mass
 }
 SERVO_TORQUE = 30.0 * 9.80665 / 100.0   # 30 kg.cm @ 11.1 V -> 2.94 N.m (used as stall torque)
 SERVO_SPEED = math.radians(60) / 0.19   # 0.19 s / 60 deg @ 11.1 V -> 5.51 rad/s (no load)
@@ -45,6 +47,13 @@ SERVO_KV = SERVO_TORQUE / SERVO_SPEED   # back-EMF slope of the DC motor: 0.533 
 SERVO_KP = 30.0                         # N.m/rad : saturates (2.94 N.m) at ~5.6 deg of error
 SERVO_ARMATURE = 0.004                  # kg.m^2 reflected rotor inertia (~5e-8 kg.m^2 x ~285^2)
 SERVO_FRICTION = 0.03                   # N.m gear-train Coulomb friction
+
+# v7 depth camera (fusion/pentapod_camera_v7.py): optical centre (RGB lens = aligned depth frame) in the
+# body frame, mm, and its pitch. The camera looks along (0, -cos p, -sin p): the gap between legs 3 and 4.
+CAM_LENS_MM = (0.0, -38.87, 133.03)
+CAM_PITCH_DEG = 15.0
+CAM_FOVY_DEG = 58.0                     # OV7251 stereo pair: 73 x 58 deg (HFOV x VFOV), 640 x 480
+V6_APEX_CAP_CM3 = None                  # computed in process_camera from the v6 dome dimensions
 
 # link frames in the LEG frame (mm): coxa = hip axis, femur = femur axis, tibia = knee axis
 PFX, PFZ = 144.7, 12.75
@@ -226,6 +235,47 @@ def process_fusion(src):
     print(json.dumps(report, indent=1))
 
 
+def v6_apex_cap_volume():
+    """Volume (cm3) of the v6 dome apex cap: the 2.4 mm spherical shell inside r < 40 mm."""
+    rr = math.sqrt(175.0 ** 2 - 115.0 ** 2)
+    ro = (rr ** 2 + 70.0 ** 2) / (2 * 70.0)
+    ri = ro - 2.4
+    r = np.linspace(0, 40.0, 4001)
+    dz = np.sqrt(ro ** 2 - r ** 2) - np.sqrt(ri ** 2 - r ** 2)
+    return float(np.trapezoid(dz * 2 * math.pi * r, r)) * 1e-3
+
+
+def process_camera(src):
+    """v7 camera STLs (mm, body frame) -> meshes/camera_*.stl + massprops.json["camera"].
+
+    camera_oakd_lite.stl : the two housing shells of the vendor STEP (front + back cover)
+    camera_mount_cap.stl : "Dome Apex Cap (camera mount)", replaces the v6 apex cap
+    Camera body frame = body axes, origin at CAM_LENS_MM. Its mass = camera (61 g) + the
+    material the mount adds over the v6 cap (the cap itself is already in the dome mass)."""
+    js = json.load(open(os.path.join(MESH_DIR, "massprops.json")))
+    o = np.array(CAM_LENS_MM)
+    cam = read_stl(os.path.join(src, "camera_oakd_lite.stl"))
+    cap = read_stl(os.path.join(src, "camera_mount_cap.stl"))
+    vol_c, com_c, I_c = mass_props(cam * 1e-1)
+    vol_m, com_m, I_m = mass_props(cap * 1e-1)
+    m_cam = MASS_ASSUMPTIONS["oakd_lite"]
+    v_old = v6_apex_cap_volume()
+    m_mount = (vol_m - v_old) * PLA * FILL
+    parts = [(m_cam * 1e-3, com_c * 1e-2 - o * 1e-3, I_c * (m_cam * 1e-3 / vol_c) * 1e-4),
+             (m_mount * 1e-3, com_m * 1e-2 - o * 1e-3, I_m * (m_mount * 1e-3 / vol_m) * 1e-4)]
+    M, c, I = combine(parts)
+    write_stl(os.path.join(MESH_DIR, "camera_oakd_lite.stl"), decimate(cam, 3000) * 1e-3 - o * 1e-3)
+    write_stl(os.path.join(MESH_DIR, "camera_mount_cap.stl"), cap * 1e-3)
+    js["camera"] = {"mass": M, "pos": list(c), "inertia": np.asarray(I).tolist()}
+    js["_report"]["camera"] = {"oakd_lite_g": m_cam, "mount_cm3": round(vol_m, 2), "v6_cap_cm3": round(v_old, 2),
+                               "mount_added_g": round(m_mount, 1), "note": "camera: uniform over the housing CAD volume"}
+    js["_meshes"]["camera_oakd_lite"] = len(decimate(cam, 3000))
+    js["_meshes"]["camera_mount_cap"] = len(cap)
+    js["_assumptions"]["oakd_lite"] = m_cam
+    json.dump(js, open(os.path.join(MESH_DIR, "massprops.json"), "w"), indent=1)
+    print(json.dumps(js["_report"]["camera"], indent=1))
+
+
 # ----------------------------------------------------------------------------------------------
 def f(v, n=6):
     return " ".join(f"{x:.{n}g}" if abs(x) > 1e-12 else "0" for x in np.ravel(v))
@@ -301,6 +351,22 @@ def build_xml():
     a('      <geom name="c_dome" mesh="base_dome" type="mesh" class="collision"/>')
     a('      <site name="imu" pos="-0.0483 0.04145 0.0605" size="0.006" rgba="1 0.5 0 1" group="4"/>')
     a('      <site name="base_center" pos="0 0 0" size="0.005"/>')
+    if "camera" in mp:
+        cp, cs = math.cos(math.radians(CAM_PITCH_DEG)), math.sin(math.radians(CAM_PITCH_DEG))
+        a('      <!-- v7: Luxonis OAK-D Lite on the camera-mount apex cap (fusion/pentapod_camera_v7.py) -->')
+        a('      <geom name="v_camera_mount" mesh="camera_mount_cap" class="visual_body" group="1"/>')
+        a(f'      <body name="camera" pos="{f(np.array(CAM_LENS_MM) * 1e-3)}">')
+        a('        ' + inertial(mp["camera"]))
+        a('        <geom name="v_camera" mesh="camera_oakd_lite" class="visual_servo"/>')
+        # housing: 91 x 28 x 17.5 mm, lens 19 mm above the bottom face, on the cover glass
+        hc = np.array([0.0, 0.0, 0.0]) + 0.00875 * np.array([0, cp, cs]) + (0.014 - 0.019) * np.array([0, -cs, cp])
+        a(f'        <geom name="c_camera" type="box" pos="{f(hc)}" xyaxes="1 0 0 0 {cp:.5f} {cs:.5f}" '
+          f'size="0.0455 0.00875 0.014" class="collision"/>')
+        a('        <!-- MuJoCo cameras look along -z (y up): z = (0, cos p, sin p), image right = body -x.')
+        a('             2 mm in front of the cover glass so the housing never enters the view. -->')
+        a(f'        <camera name="oakd" pos="0 {-0.002 * cp:.5f} {-0.002 * cs:.5f}" xyaxes="-1 0 0 0 {-cs:.5f} {cp:.5f}" fovy="{CAM_FOVY_DEG}"/>')
+        a('        <site name="camera" size="0.004" rgba="0 0.6 1 1"/>')
+        a('      </body>')
     for n in range(1, 6):
         ang = K.LEG_ANG_DEG[n - 1]
         p = K.rotz(math.radians(ang)) @ np.array([K.R_HIP, 0, K.HIP_Z])
@@ -370,7 +436,7 @@ def build_xml():
     a('  </keyframe>')
     a('</mujoco>')
     open(os.path.join(HERE, "rocky.xml"), "w").write("\n".join(L) + "\n")
-    tot = mp["base"]["mass"] + 5 * (mp["coxa"]["mass"] + mp["femur"]["mass"] + mp["tibia"]["mass"])
+    tot = mp["base"]["mass"] + mp.get("camera", {"mass": 0.0})["mass"] + 5 * (mp["coxa"]["mass"] + mp["femur"]["mass"] + mp["tibia"]["mass"])
     print(f"wrote rocky.xml  total mass {tot:.3f} kg, stand base z {base_z:.4f} m")
 
 
@@ -391,7 +457,7 @@ def build_rough_scene(max_height=0.025, n=100, size=5.0, seed=7):
     elev = " ".join(f"{v:.3f}" for v in z.ravel())
     s = flat.replace('<mujoco model="rocky_scene">', '<mujoco model="rocky_scene_rough">')
     s = s.replace("  </asset>", f'    <hfield name="rough" nrow="{n}" ncol="{n}" size="{size} {size} {max_height} 0.05" elevation="{elev}"/>\n  </asset>')
-    s = s.replace('<geom name="floor" size="0 0 0.05" type="plane"', '<geom name="floor" type="hfield" hfield="rough" pos="0 0 0"')
+    s = s.replace('<geom name="floor" size="10 10 0.05" type="plane"', '<geom name="floor" type="hfield" hfield="rough" pos="0 0 0"')
     open(os.path.join(HERE, "scene_rough.xml"), "w").write(s)
     print(f"wrote scene_rough.xml ({n}x{n} heightfield, bumps up to {max_height*100:.1f} cm)")
 
@@ -399,8 +465,11 @@ def build_rough_scene(max_height=0.025, n=100, size=5.0, seed=7):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--fusion-export", help="folder with the raw STLs + export_info.json from Fusion")
+    ap.add_argument("--camera-export", help="folder with camera_oakd_lite.stl + camera_mount_cap.stl (v7)")
     a = ap.parse_args()
     if a.fusion_export:
         process_fusion(a.fusion_export)
+    if a.camera_export or a.fusion_export:
+        process_camera(a.camera_export or a.fusion_export)
     build_xml()
     build_rough_scene()

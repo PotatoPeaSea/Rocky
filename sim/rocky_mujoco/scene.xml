@@ -14,7 +14,7 @@
   </asset>
   <worldbody>
     <light pos="0 0 2.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001"/>
+    <geom name="floor" size="10 10 0.05" type="plane" material="groundplane" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001"/>
   </worldbody>
   <sensor>
     <!-- foot/floor contact flags (used by the MJX env; handy for gait code too) -->

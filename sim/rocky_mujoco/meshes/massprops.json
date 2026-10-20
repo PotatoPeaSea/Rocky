@@ -170,6 +170,13 @@
   "pi5+cooler": {
    "mass_g": 67.0,
    "note": "box over the CAD bounding box"
+  },
+  "camera": {
+   "oakd_lite_g": 61.0,
+   "mount_cm3": 26.73,
+   "v6_cap_cm3": 12.26,
+   "mount_added_g": 14.4,
+   "note": "camera: uniform over the housing CAD volume"
   }
  },
  "_meshes": {
@@ -184,7 +191,9 @@
   "base_hip_servos": 5998,
   "battery": 76,
   "pi5": 5886,
-  "pi5_cooler": 2998
+  "pi5_cooler": 2998,
+  "camera_oakd_lite": 3000,
+  "camera_mount_cap": 2240
  },
  "_assumptions": {
   "servo": 52.0,
@@ -198,6 +207,32 @@
   "PLA": 1.24,
   "TPU": 1.21,
   "FILL": 0.8,
-  "FILL_DOME": 0.95
+  "FILL_DOME": 0.95,
+  "oakd_lite": 61.0
+ },
+ "camera": {
+  "mass": 0.07535422533551416,
+  "pos": [
+   0.0003160192517859584,
+   0.01360753617590884,
+   -0.004783174146838353
+  ],
+  "inertia": [
+   [
+    1.764503590599687e-05,
+    -2.573720467304178e-08,
+    5.42739882018473e-08
+   ],
+   [
+    -2.5737204673048952e-08,
+    5.845251632852951e-05,
+    4.3654645132921055e-06
+   ],
+   [
+    5.427398820185054e-08,
+    4.365464513292102e-06,
+    6.09478359462705e-05
+   ]
+  ]
  }
 }

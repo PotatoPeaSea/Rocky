@@ -5,6 +5,8 @@ stable-baselines3>=2.3      # pulls in torch (the default Windows wheel is CPU-o
 numpy>=1.24
 imageio>=2.30
 imageio-ffmpeg>=0.4         # MP4 writing for --record
+opencv-python-headless>=4.8 # visual odometry (rocky_vision.py)
+matplotlib>=3.7             # estimate_demo.py plots
 # Optional
 # tensorboard               # live training curves:  tensorboard --logdir runs
 # trimesh                   # only for: python build_model.py --fusion-export <dir>

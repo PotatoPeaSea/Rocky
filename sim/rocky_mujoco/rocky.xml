@@ -34,6 +34,8 @@
     <mesh name="base_dome" file="base_dome.stl"/>
     <mesh name="base_hip_servos" file="base_hip_servos.stl"/>
     <mesh name="battery" file="battery.stl"/>
+    <mesh name="camera_mount_cap" file="camera_mount_cap.stl"/>
+    <mesh name="camera_oakd_lite" file="camera_oakd_lite.stl"/>
     <mesh name="leg_coxa" file="leg_coxa.stl"/>
     <mesh name="leg_femur" file="leg_femur.stl"/>
     <mesh name="leg_foot" file="leg_foot.stl"/>
@@ -59,6 +61,17 @@
       <geom name="c_dome" mesh="base_dome" type="mesh" class="collision"/>
       <site name="imu" pos="-0.0483 0.04145 0.0605" size="0.006" rgba="1 0.5 0 1" group="4"/>
       <site name="base_center" pos="0 0 0" size="0.005"/>
+      <!-- v7: Luxonis OAK-D Lite on the camera-mount apex cap (fusion/pentapod_camera_v7.py) -->
+      <geom name="v_camera_mount" mesh="camera_mount_cap" class="visual_body" group="1"/>
+      <body name="camera" pos="0 -0.03887 0.13303">
+        <inertial pos="0.000316019 0.0136075 -0.00478317" mass="0.07535" fullinertia="1.7645e-05 5.8453e-05 6.0948e-05 -2.5737e-08 5.4274e-08 4.3655e-06"/>
+        <geom name="v_camera" mesh="camera_oakd_lite" class="visual_servo"/>
+        <geom name="c_camera" type="box" pos="0 0.00974595 -0.00256496" xyaxes="1 0 0 0 0.96593 0.25882" size="0.0455 0.00875 0.014" class="collision"/>
+        <!-- MuJoCo cameras look along -z (y up): z = (0, cos p, sin p), image right = body -x.
+             2 mm in front of the cover glass so the housing never enters the view. -->
+        <camera name="oakd" pos="0 -0.00193 -0.00052" xyaxes="-1 0 0 0 -0.25882 0.96593" fovy="58.0"/>
+        <site name="camera" size="0.004" rgba="0 0.6 1 1"/>
+      </body>
       <!-- ===== leg 1  (servo IDs 1, 2, 3) at 90 deg ===== -->
       <body name="leg1_coxa" pos="0 0.1 0" quat="0.70710678 0 0 0.70710678">
         <inertial pos="0.0394231 -2.99581e-05 -0.000257308" mass="0.09595" fullinertia="3.3807e-05 5.107e-05 3.2366e-05 9.4609e-09 1.1158e-07 -1.6025e-07"/>
