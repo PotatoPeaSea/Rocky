@@ -15,8 +15,9 @@ v6 changes (from v5)
     fuse holder, Adafruit BNO085. All of it moves onto the new integrated control PCB
     (ESP32 module, servo-bus driver, 5 V / 3.3 V regulators, fuse, bulk caps, battery sense, IMU).
   - kept: plates, deck, dome, posts, legs, 15 servos, Pi 5 + Active Cooler, battery, XT60 loop key.
-  - plate / deck geometry is unchanged. The holes, slots and bosses that only served v5 parts
-    are still cut / added; they are gated by V5_MOUNTS so a later revision can drop them.
+  - V5_MOUNTS picks which v5 leftovers stay: hub-holder holes, LM2596 + Pololu bosses and deck holes A / C
+    are gone; BusLinker, perfboard and BNO085 bosses (control-PCB mounts) and hole B (battery leads) stay.
+  - BNO085 breakout back at its v5 x/y, on 6 mm spacers on top of the control PCB (screws into the v5 IMU bosses).
   - PCB_STEP: if that file exists in HW_DIR, stage_hardware places it on the deck (PCB_M).
 """
 import math, os
@@ -216,7 +217,11 @@ TRAY_SCREWS = [(61.0, 0.0), (-61.0, 0.0), (0.0, 27.0), (0.0, -27.0)]
 SWX, SWY = 0.0, -68.0
 FUSE_C = (-20.0, 16.0, 0.0)          # wire axis centre of the inline ATM holder
 # ---- top plate: v5 legacy features (only cut / added when V5_MOUNTS) ----
-V5_MOUNTS = True                     # keep v5 holes / slots / bosses for removed parts
+# v5 leftovers: True = still cut / added. The control PCB mounts on the BusLinker, perfboard and BNO085
+# bosses (the BNO085 breakout is stacked on the PCB over its v5 bosses); hole B is the battery-lead entry.
+V5_MOUNTS = {'hub_screws': False, 'lm2596_bosses': False, 'pololu_bosses': False,
+             'buslinker_bosses': True, 'perfboard_bosses': True, 'imu_bosses': True,
+             'hole_A': False, 'hole_B': True, 'hole_C': False}
 SLOT_R0, SLOT_R1 = 53.5, 61.0        # branch slot in the top plate, on each leg axis (real servo cables)
 BRK_R = 57.5                         # v5 branch break-out radius (reference only)
 PWR_SLOT = (0.0, -56.0)              # battery leads come up here (12 x 8)
@@ -237,8 +242,12 @@ IMU_C, IMU_Z0 = (-48.3, 41.45), DECK_Z1 + 5.0             # v5 Adafruit BNO085
 HOLE_A, HOLE_B, HOLE_C = (-58.0, -36.0, 6.0), (0.0, -71.0, 5.5), (-40.0, 60.0, 5.0)   # v5 wire holes
 # new integrated control PCB (placed only if the STEP exists in HW_DIR)
 PCB_STEP = 'rocky_control_pcb.step'
-PCB_ORIGIN = (0.0, 0.0, DECK_Z1)     # STEP origin lands here (board underside on the deck top)
+PCB_ORIGIN = (0.0, 0.0, PI_Z0)       # STEP origin (board centre, underside) lands here: z 60.5, on the deck bosses
 PCB_ROT = 0.0                        # deg about z
+PCB_T = 1.6
+# BNO085 breakout: same x/y as v5, but on 6 mm spacers ON TOP of the control PCB (long M2.5 screws into
+# the v5 IMU bosses through breakout, spacer and PCB)
+IMU_Z_V6 = PCB_ORIGIN[2] + PCB_T + 6.0     # 68.1
 
 app = adsk.core.Application.get()
 
@@ -405,9 +414,10 @@ def chassis_geometry():
         D(botp, cyl((x, y, ZPB-1), (x, y, -GZB+1), 2.0))                              # M3 heat-set
     topp = plate(GZT, ZPT, GZT-5, GZT, CASE_HOLES_MAIN, True)
     D(topp, bx(PWR_SLOT[0]-6, PWR_SLOT[0]+6, PWR_SLOT[1]-4, PWR_SLOT[1]+4, GZT-1, ZPT+1))
-    if V5_MOUNTS:
+    if V5_MOUNTS['hub_screws']:
         for a in (30, 150, 270):                                                     # v5 hub holder screws
             x, y = pol(18, a); D(topp, cyl((x, y, GZT-1), (x, y, ZPT+1), 1.25))
+    if V5_MOUNTS['lm2596_bosses']:
         Mlm = lm_M()
         for hx, hz in ((2.3, -6.3), (18.3, -36.8)):                                  # v5 LM2596 bosses
             p = xf(Mlm, (hx, 0, hz))
@@ -444,18 +454,21 @@ def chassis_geometry():
         x, y = pol(POST_RAD, a+36)
         D(deck, cyl((x, y, DECK_Z0-1), (x, y, DECK_Z1+1), 1.7))
     bosses = [(PI_HOLES, PI_Z0, 3.2, 1.1)]                                           # M2.5 thread-forming
-    if V5_MOUNTS:                                                                   # v5 parts, removed in v6
-        bosses += [(PB_HOLES, PB_Z0, 2.6, 0.8),                                      # ESP32 perfboard, M2
-                   ([(BL_C[0] + s*18, BL_C[1] + t*14) for s in (-1, 1) for t in (-1, 1)], BL_Z0, 3.0, 1.1),
-                   ([xf(pololu_M(), (hx, hy, 0))[:2] for hx, hy in ((2.16, 2.16), (2.16, 23.24), (23.24, 2.16))],
-                    POL_Z - 1.62, 2.0, 0.8),
-                   ([(IMU_C[0] + s*10.16, IMU_C[1] + t*8.89) for s in (-1, 1) for t in (-1, 1)], IMU_Z0, 3.0, 1.1)]
+    if V5_MOUNTS['perfboard_bosses']:                                               # control PCB, M2
+        bosses.append((PB_HOLES, PB_Z0, 2.6, 0.8))
+    if V5_MOUNTS['buslinker_bosses']:                                               # control PCB, M2.5
+        bosses.append(([(BL_C[0] + s*18, BL_C[1] + t*14) for s in (-1, 1) for t in (-1, 1)], BL_Z0, 3.0, 1.1))
+    if V5_MOUNTS['pololu_bosses']:
+        bosses.append(([xf(pololu_M(), (hx, hy, 0))[:2] for hx, hy in ((2.16, 2.16), (2.16, 23.24), (23.24, 2.16))],
+                       POL_Z - 1.62, 2.0, 0.8))
+    if V5_MOUNTS['imu_bosses']:                                                     # BNO085 breakout under the PCB
+        bosses.append(([(IMU_C[0] + s*10.16, IMU_C[1] + t*8.89) for s in (-1, 1) for t in (-1, 1)], IMU_Z0, 3.0, 1.1))
     for pts, ztop, rb, rp in bosses:
         for hx, hy in pts:
             U(deck, cyl((hx, hy, DECK_Z1), (hx, hy, ztop), rb))
             D(deck, cyl((hx, hy, DECK_Z1 - 2), (hx, hy, ztop + 1), rp))
-    if V5_MOUNTS:                                                                   # v5 wire pass-throughs
-        for hx, hy, hr in (HOLE_A, HOLE_B, HOLE_C):
+    for key, (hx, hy, hr) in (('hole_A', HOLE_A), ('hole_B', HOLE_B), ('hole_C', HOLE_C)):   # wire pass-throughs
+        if V5_MOUNTS[key]:
             D(deck, cyl((hx, hy, DECK_Z0-1), (hx, hy, DECK_Z1+1), hr))
     items.append((deck, 'Logic Deck'))
     return {'Chassis': items}
@@ -499,6 +512,7 @@ def hw_list():
             place([(0, 0, 1), (1, 0, 0), (0, 1, 0)], (-3.22, 0, 0), (x, y, ZPB)))
     add('RaspberryPi5 (simplified).step', 'Raspberry Pi 5', place(I3, (0, 0, 0), (PI_X0, PI_Y0, PI_Z0)))
     add('Pi5 Active Cooler (Pi frame).step', 'Raspberry Pi Active Cooler', place(I3, (0, 0, -1.6), (PI_X0, PI_Y0, PI_Z0)))   # seated on the SoC
+    add('Adafruit BNO085 STEMMA QT.step', 'Adafruit BNO085 IMU', place(I3, (0, 0, 0), (IMU_C[0], IMU_C[1], IMU_Z_V6)))   # on the control PCB
     return L
 
 
