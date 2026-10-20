@@ -99,16 +99,16 @@ def mount_geometry(cap):
 
 
 def stage_camera(ident=None):
+    # Create the occurrence at its final pose, then import into it (as v6 place_part does). Setting
+    # occ.transform after the import moves the STEP's nested sub-assemblies inconsistently.
     r = root()
-    occ = find_occ(r, CAM_NAME)
-    if occ is None:
-        occ = r.occurrences.addNewComponent(adsk.core.Matrix3D.create())
-        occ.component.name = CAM_NAME
-        import_into(occ.component, os.path.join(HW_DIR, CAM_STEP))
-    occ.transform = fmatrix(cam_M())
-    des = adsk.fusion.Design.cast(app.activeProduct)
-    if des.snapshots.hasPendingSnapshot:          # capture the position, or the next recompute resets it
-        des.snapshots.add()
+    old = find_occ(r, CAM_NAME)
+    if old is not None:
+        old.deleteMe()
+    occ = r.occurrences.addNewComponent(fmatrix(cam_M()))
+    occ.component.name = CAM_NAME
+    if not import_into(occ.component, os.path.join(HW_DIR, CAM_STEP)):
+        raise RuntimeError('missing ' + CAM_STEP)
     return occ
 
 
