@@ -74,6 +74,10 @@ def main(ses):
         for p in fp.Pads():
             if p.GetNetname() in ('GND', '/VBAT_IN', '/VBAT_F', '/VSERVO', '+5V'):
                 p.SetLocalZoneConnection(pcbnew.ZONE_CONNECTION_FULL)
+    for ref in ('J3', 'U4', 'J12', 'J10'):
+        for p in board.FindFootprintByReference(ref).Pads():
+            if p.GetNetname() == 'GND':
+                p.SetLocalZoneConnection(pcbnew.ZONE_CONNECTION_FULL)
 
     # GND stitching vias on a grid (connect top/bottom pours to In1)
     obst = []

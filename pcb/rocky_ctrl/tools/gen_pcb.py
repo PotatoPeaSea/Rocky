@@ -46,7 +46,7 @@ def inside_board(x, y, margin=0.9):
         return False
     if -NOTCH_X - margin < x < NOTCH_X + margin and y < NOTCH_TOP + margin:
         return False
-    if 69.5 < x and -2.5 < y < 22.5:      # ESP32 antenna keep-out
+    if 74.8 < x and -2.5 < y < 22.5:      # ESP32 antenna keep-out
         return False
     return True
 
@@ -126,6 +126,7 @@ def keepout(board, pts, name, layers=None, tracks=True, vias=True, pours=True, f
     for p in pts:
         v = K(*p); ol.Append(v.x, v.y)
     board.Add(z)
+    return z
 
 
 def setup(board):
@@ -149,14 +150,14 @@ def setup(board):
     dflt.SetViaDiameter(pcbnew.FromMM(0.6)); dflt.SetViaDrill(pcbnew.FromMM(0.3))
     for name, width, clr, via, drill in (('Power', 0.6, 0.2, 0.8, 0.4), ('HighCurrent', 1.0, 0.2, 0.8, 0.4),
                                          ('Plane', 0.5, 0.2, 0.8, 0.4), ('Manual', 1.0, 0.2, 0.8, 0.4),
-                                         ('USB', 0.3, 0.18, 0.6, 0.3)):
+                                         ('USB', 0.2, 0.15, 0.6, 0.3), ('USBPWR', 0.4, 0.15, 0.6, 0.3)):
         n = pcbnew.NETCLASS(name)
         n.SetTrackWidth(pcbnew.FromMM(width)); n.SetClearance(pcbnew.FromMM(clr))
         n.SetViaDiameter(pcbnew.FromMM(via)); n.SetViaDrill(pcbnew.FromMM(drill))
         nc.SetNetclass(name, n)
     for pat, cls in (('/VBAT_IN', 'Manual'), ('/VBAT_F', 'HighCurrent'), ('/VBAT_P', 'HighCurrent'),
                      ('/VSERVO', 'Plane'), ('GND', 'Plane'), ('/VSERVO_SW', 'Manual'), ('/B5_SW', 'Manual'), ('+5V', 'Power'), ('/V_LOGIC', 'Power'),
-                     ('/B3_SW', 'Power'), ('/USB_VBUS', 'Power'), ('+3V3', 'Power'), ('/VIO', 'Power'),
+                     ('/B3_SW', 'Power'), ('/USB_VBUS', 'USBPWR'), ('+3V3', 'Power'), ('/VIO', 'Power'),
                      ('/USB_D?', 'USB')):
         nc.SetNetclassPatternAssignment(pat, cls)
 
@@ -251,7 +252,18 @@ def build(netfile, out):
     outline(board)
     # ESP32 antenna keep-out: no copper on any layer beyond the module pads (antenna end faces +x)
     u7 = board.FindFootprintByReference('U7')
-    keepout(board, [(70.0, -2.0), (80, -2.0), (80, 22.0), (70.0, 22.0)], 'ESP32 antenna')
+    keepout(board, [(75.2, -2.0), (82, -2.0), (82, 22.0), (75.2, 22.0)], 'ESP32 antenna')
+    # 0.45 mm track/via keep-out bands along every edge (the autorouter ignores copper-to-edge clearance)
+    g = 0.45
+    keepout(board, [(-53 - g, 30 + g), (40 + g, 30 + g), (40 + g, -31 - g), (-31 + g, -31 - g), (-31 + g, -50 - g),
+                    (-47 - g, -50 - g), (-47 - g, -31 - g), (-53 - g, -31 - g)], 'edge band cut-out', pours=False)
+    keepout(board, [(-NOTCH_X - g, NOTCH_TOP + g), (NOTCH_X + g, NOTCH_TOP + g), (NOTCH_X + g, -82), (-NOTCH_X - g, -82)],
+            'edge band notch', pours=False)
+    z = keepout(board, [placement.pol(R_OUT + 3, k * 3.75) for k in range(96)], 'edge band outer', pours=False)
+    ol = z.Outline()
+    ol.NewHole()
+    for k in range(96):
+        v = K(*placement.pol(R_OUT - g, k * 3.75)); ol.Append(v.x, v.y, -1, 0)
     # Board marking
     text(board, 'ROCKY CONTROL v1', -20.0, 70.0, 2.2, bold=True)
     text(board, 'Rocky pentapod  |  M. Lin  |  2026-10', -20.0, 66.5, 1.2)

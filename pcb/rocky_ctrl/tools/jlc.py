@@ -1,6 +1,10 @@
 """Write JLCPCB BOM + CPL from the board (top-side assembly; holes, test pads and solder jumpers excluded)."""
 import csv
+import os, sys
 import pcbnew
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import design
+META = {p['ref']: p for p in design.PARTS}
 P = '/home/claude/rocky/pcb/rocky_ctrl/'
 b = pcbnew.LoadBoard(P + 'rocky_ctrl.kicad_pcb')
 groups = {}
@@ -11,7 +15,7 @@ for fp in sorted(b.GetFootprints(), key=lambda f: f.GetReference()):
     if ref.startswith(('H', 'TP', 'JP')):
         continue
     def fld(n):
-        return fp.GetFieldText(n) if fp.HasFieldByName(n) else ''
+        return META.get(ref, {}).get({'LCSC': 'lcsc', 'MPN': 'mpn'}[n], '')
     key = (fp.GetValue(), fp.GetFPIDAsString().split(':')[1], fld('LCSC'), fld('MPN'))
     groups.setdefault(key, []).append(ref)
     pos = fp.GetPosition()

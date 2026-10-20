@@ -1,0 +1,124 @@
+** Drc report for rocky_ctrl.kicad_pcb **
+** Created on 2026-10-19T22:56:19-0700 **
+** Report includes: Errors, Warnings, Exclusions **
+
+** Found 29 DRC violations **
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(144.0900 mm, 84.7113 mm): Segment of C39 on F.Silkscreen
+    @(130.0000 mm, 83.5000 mm): PCB text 'Rocky pentapod  |  M. Lin  |  2026-10' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(144.6400 mm, 79.7100 mm): Segment of J5 on F.Silkscreen
+    @(130.0000 mm, 80.0000 mm): PCB text 'ROCKY CONTROL v1' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(144.9400 mm, 79.4100 mm): Segment of J5 on F.Silkscreen
+    @(130.0000 mm, 80.0000 mm): PCB text 'ROCKY CONTROL v1' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(144.9400 mm, 74.2900 mm): Segment of J5 on F.Silkscreen
+    @(130.0000 mm, 80.0000 mm): PCB text 'ROCKY CONTROL v1' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(144.6400 mm, 77.3000 mm): Segment of J5 on F.Silkscreen
+    @(130.0000 mm, 80.0000 mm): PCB text 'ROCKY CONTROL v1' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(145.9100 mm, 84.7113 mm): Segment of C39 on F.Silkscreen
+    @(130.0000 mm, 83.5000 mm): PCB text 'Rocky pentapod  |  M. Lin  |  2026-10' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(130.0000 mm, 83.5000 mm): PCB text 'Rocky pentapod  |  M. Lin  |  2026-10' on F.Silkscreen
+    @(148.6500 mm, 85.6100 mm): Segment of D5 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(85.6900 mm, 131.3332 mm): Reference field of C40
+    @(88.3485 mm, 131.3859 mm): Segment of D6 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(186.5300 mm, 200.1000 mm): Segment of F1 on F.Silkscreen
+    @(186.4400 mm, 200.1600 mm): PCB text 'LEG 4' on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(186.4400 mm, 200.1600 mm): PCB text 'LEG 4' on F.Silkscreen
+    @(186.5300 mm, 183.9000 mm): Segment of F1 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(193.3650 mm, 183.9464 mm): Reference field of Q1
+    @(193.4700 mm, 183.9000 mm): Segment of F1 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(193.4700 mm, 200.1000 mm): Segment of F1 on F.Silkscreen
+    @(193.3650 mm, 183.9464 mm): Reference field of Q1
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(196.0000 mm, 191.0464 mm): Reference field of R1
+    @(195.3300 mm, 190.6850 mm): Segment of Q1 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(151.0431 mm, 190.5000 mm): Reference field of C12
+    @(151.9100 mm, 191.2113 mm): Segment of C11 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(151.0431 mm, 190.5000 mm): Reference field of C12
+    @(150.0900 mm, 191.2113 mm): Segment of C11 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(170.0000 mm, 90.0464 mm): Reference field of C35
+    @(172.0000 mm, 84.0000 mm): Circle of C6 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(198.5917 mm, 124.0464 mm): Reference field of LED5
+    @(197.7500 mm, 123.0000 mm): Segment of SW1 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(200.2869 mm, 141.5464 mm): Reference field of C25
+    @(200.6000 mm, 141.1000 mm): Segment of L2 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(113.5600 mm, 200.1600 mm): PCB text 'LEG 3' on F.Silkscreen
+    @(116.2627 mm, 201.9775 mm): Segment of R20 on F.Silkscreen
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(112.6063 mm, 210.0790 mm): Segment of J7 on F.Silkscreen
+    @(110.7300 mm, 207.9744 mm): Reference field of D7
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(107.5000 mm, 205.3980 mm): Reference field of R49
+    @(112.6063 mm, 210.0790 mm): Segment of J7 on F.Silkscreen
+[silk_over_copper]: Silkscreen clipped by solder mask
+    Local override; warning
+    @(130.0000 mm, 83.5000 mm): PCB text 'Rocky pentapod  |  M. Lin  |  2026-10' on F.Silkscreen
+[silk_over_copper]: Silkscreen clipped by solder mask
+    Local override; warning
+    @(113.5600 mm, 200.1600 mm): PCB text 'LEG 3' on F.Silkscreen
+[silk_over_copper]: Silkscreen clipped by solder mask
+    Local override; warning
+    @(186.4400 mm, 200.1600 mm): PCB text 'LEG 4' on F.Silkscreen
+[silk_edge_clearance]: Silkscreen clipped by board edge
+    Rule: board setup constraints silk; warning
+    @(150.0000 mm, 150.0000 mm): Arc on Edge.Cuts
+    @(180.0000 mm, 221.5000 mm): PCB text '3S LiPo 9-12.6V  20A ATM fuse' on F.Silkscreen
+[silk_edge_clearance]: Silkscreen clipped by board edge
+    Rule: board setup constraints silk; warning
+    @(119.0000 mm, 200.0000 mm): Segment on Edge.Cuts
+    @(113.5600 mm, 200.1600 mm): PCB text 'LEG 3' on F.Silkscreen
+[silk_edge_clearance]: Silkscreen clipped by board edge
+    Rule: board setup constraints silk; warning
+    @(150.0000 mm, 150.0000 mm): Arc on Edge.Cuts
+    @(130.0000 mm, 80.0000 mm): PCB text 'ROCKY CONTROL v1' on F.Silkscreen
+[silk_edge_clearance]: Silkscreen clipped by board edge
+    Rule: board setup constraints silk; warning
+    @(150.0000 mm, 150.0000 mm): Arc on Edge.Cuts
+    @(222.9440 mm, 176.2000 mm): Segment of J3 on F.Silkscreen
+[silk_edge_clearance]: Silkscreen clipped by board edge
+    Rule: board setup constraints silk; warning
+    @(150.0000 mm, 150.0000 mm): Arc on Edge.Cuts
+    @(224.8440 mm, 176.2000 mm): Segment of J3 on F.Silkscreen
+
+** Found 0 unconnected pads **
+
+** Found 0 Footprint errors **
+
+** End of Report **

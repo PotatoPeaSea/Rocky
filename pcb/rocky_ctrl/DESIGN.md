@@ -246,7 +246,14 @@ The frame is the v6 model frame: the origin is the body centre on the hip-servo 
 
 ---
 
-## 10. Regenerating
+## 10. Verification status (2026-10-19)
+
+- **ERC** (`fab/erc.rpt`, all severities): 0 errors, 0 warnings.
+- **DRC** (`fab/drc.rpt`, with schematic parity): 0 errors, 0 unconnected pads, 0 footprint/parity issues. 29 silkscreen warnings remain (reference text clipped by the board edge or overlapping other silk), which are cosmetic. 27 crowded references are hidden on silk but still on F.Fab.
+- **Signals:** routed by Freerouting 1.9 on F.Cu/B.Cu only. In1 (GND) and In2 (VSERVO) were declared power planes to the router, so they stay unbroken. A 0.45 mm track keep-out band runs along every edge.
+- **Hand fixes after autorouting:** R20 +5V via + B.Cu link to J2, one rejoined +5V B.Cu segment, and 4 GND island vias (`tools/island_vias.py`). These were applied directly to the board, so a full regeneration from the scripts needs a fresh autoroute plus a DRC pass.
+
+## 11. Regenerating
 
 KiCad 9 Python (pcbnew) and a JDK for Freerouting are needed. From `pcb/rocky_ctrl/`:
 
@@ -257,6 +264,7 @@ python3 tools/gen_pcb.py /tmp/rocky.net                    # placed board, outli
 python3 tools/power_route.py                               # hand power copper + GND/VSERVO fan-out
 tools/route.sh                                             # Freerouting 1.9 (signals only)
 python3 tools/finish_pcb.py /tmp/rocky.ses                 # import routes, pours, stitching, fill
+python3 tools/island_vias.py                               # stitch any GND pour island without a via
 tools/export.sh                                            # ERC/DRC, STEP, Gerbers, BOM, CPL, PDF, renders
 ```
 

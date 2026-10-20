@@ -306,7 +306,8 @@ def main():
             ux = ox + k * snap((x1 - x0) + 30)
             unit_pins = [pp for pp in pins if pp[0] == unit or pp[0] == 0]
             add_symbol(p['lib'], p['ref'], p['value'], p['fp'], ux, oy, 0, unit=unit, props=props,
-                       pins=[pp[1] for pp in unit_pins], dnp=p['dnp'])
+                       pins=[pp[1] for pp in unit_pins], dnp=p['dnp'],
+                       in_bom=not p['ref'].startswith(('H', 'TP', 'JP')))
             done = {}
             for (_, num, name, typ, px, py, ang) in unit_pins:
                 sx, sy = r2(ux + px), r2(oy - py)
