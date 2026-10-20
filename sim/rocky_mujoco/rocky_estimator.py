@@ -51,6 +51,11 @@ INIT_STD = {"p": [0.01, 0.01, 0.01], "v": [0.05] * 3, "th": [0.02, 0.02, 0.01], 
 CHI2_GATE = {1: 10.8, 2: 13.8, 3: 16.3}             # 99.9 %
 
 
+def cross(a, b):
+    """3-vector cross product (np.cross is ~10x slower for single vectors)."""
+    return np.array([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]])
+
+
 def skew(w):
     return np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
 
@@ -104,6 +109,7 @@ class Estimator:
         self.r_cam = np.zeros(3) if r_cam is None else np.asarray(r_cam, float)   # camera origin, body frame
         self.contact = ContactDetector()
         self.hist = deque(maxlen=max(4, int(history_s / 0.004)))
+        self._Q = None
         self.reset()
 
     # ------------------------------------------------------------------ state
@@ -122,6 +128,7 @@ class Estimator:
         self.stance = np.ones(5, bool)
         self.hist.clear()
         self.stats = {"rejected": 0, "updates": 0}
+        self._leg_rejects = 0
 
     def init_from_accel(self, acc, yaw=0.0, p=(0.0, 0.0, 0.09)):
         """Level the filter from a static accelerometer reading (roll / pitch); yaw is given."""
@@ -159,7 +166,7 @@ class Estimator:
     # ------------------------------------------------------------------ IMU
     def predict(self, gyro, acc, dt):
         w = np.asarray(gyro) - self.bg
-        f = np.asarray(acc) - self.ba - np.cross(w, np.cross(w, IMU_POS))   # IMU lever arm (centripetal)
+        f = np.asarray(acc) - self.ba - cross(w, cross(w, IMU_POS))         # IMU lever arm (centripetal)
         R = self.R
         a_w = R @ f + G
         self.p = self.p + self.v * dt + 0.5 * a_w * dt * dt
@@ -173,11 +180,13 @@ class Estimator:
         F[3:6, 12:15] = -R * dt
         F[6:9, 6:9] = np.eye(3) - skew(w) * dt
         F[6:9, 9:12] = -np.eye(3) * dt
-        n = self.n
-        qa = n["acc"] ** 2 + n["acc_extra"] ** 2 * dt
-        Q = np.diag(np.concatenate([np.zeros(3), [qa * dt] * 3, [n["gyro"] ** 2 * dt] * 3,
-                                    [n["gyro_bias_rw"] ** 2 * dt] * 3, [n["acc_bias_rw"] ** 2 * dt] * 3]))
-        self.P = F @ self.P @ F.T + Q
+        if self._Q is None or self._Q[0] != dt:
+            n = self.n
+            qa = n["acc"] ** 2 + n["acc_extra"] ** 2 * dt
+            self._Q = (dt, np.concatenate([np.zeros(3), [qa * dt] * 3, [n["gyro"] ** 2 * dt] * 3,
+                                           [n["gyro_bias_rw"] ** 2 * dt] * 3, [n["acc_bias_rw"] ** 2 * dt] * 3]))
+        self.P = F @ self.P @ F.T
+        self.P[np.diag_indices(15)] += self._Q[1]
         self.t += dt
         self.hist.append((self.t, self.v.copy(), self.q.copy(), self.w.copy()))
 
@@ -230,9 +239,12 @@ class Estimator:
         h = R.T @ self.v
         H = np.zeros((3, 15))
         H[:, 3:6] = R.T
-        H[:, 6:9] = skew(R.T @ self.v)
+        H[:, 6:9] = skew(h)
         Rm = np.eye(3) * self.n["leg_vel"] ** 2 * 3.0 / st.sum()
-        ok_v = self._update(vb - h, H, Rm)
+        # gate out single bad readings, but after 5 rejections in a row trust the legs (a push or a
+        # slip changed the velocity without the IMU model seeing it; never lock the filter out)
+        ok_v = self._update(vb - h, H, Rm, gate=self._leg_rejects < 5)
+        self._leg_rejects = 0 if ok_v else self._leg_rejects + 1
         # stance-foot heights: p_z + (R p_f)_z = FOOT_R (sphere centre one radius above the ground)
         R = self.R
         idx = np.nonzero(st)[0]
@@ -274,7 +286,7 @@ class Estimator:
         t_mid = vo["t_mid"] if t_now is None else t_now - (self.t - vo["t_mid"])
         v_p, q_p, w_p = self._past(t_mid)
         Rp = quat_to_R(q_p)
-        h = Rp.T @ v_p + np.cross(w_p, self.r_cam)
+        h = Rp.T @ v_p + cross(w_p, self.r_cam)
         R = self.R
         H = np.zeros((3, 15))
         H[:, 3:6] = R.T

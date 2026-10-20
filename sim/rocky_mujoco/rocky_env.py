@@ -11,6 +11,8 @@ Interface mirrors the real robot:
         [21:36] joint velocities (rad/s, finite difference of the reported positions)
         [36:51] last action
         [51:54] command (vx, vy, wz) in the body frame (m/s, m/s, rad/s)
+        with estimator="ekf" / "ekf_cam" (rocky_estimator.py), 4 more:
+        [54:57] estimated body velocity (m/s, body frame)   [57] estimated height - stand height (m)
   * reward: standard legged-locomotion terms (legged_gym / MuJoCo Playground style), see REWARD_SCALES.
   * termination: dome/chassis touches the ground, or body tilt > 60 deg, or body below 3 cm.
 
@@ -70,10 +72,14 @@ class RockyEnv(gym.Env):
 
     def __init__(self, terrain="flat", render_mode=None, episode_seconds=20.0, action_scale=0.35,
                  domain_rand=True, dr_params=None, command_ranges=None, reward_scales=None,
-                 control_dt=0.02, base_height_target=None, seed=None, residual_around="stand"):
+                 control_dt=0.02, base_height_target=None, seed=None, residual_around="stand",
+                 estimator="none", camera_hz=25.0, camera_latency=0.04):
         """residual_around: "stand" (default) - actions are offsets from the fixed stand pose;
         "gait" - actions are offsets from the open-loop wave gait of gait_demo.py driven by the
-        current command (RL only has to learn corrections; observation gets 2 extra phase inputs)."""
+        current command (RL only has to learn corrections; observation gets 2 extra phase inputs).
+        estimator: "none" (default); "ekf" - the policy also sees the Kalman-filter estimate of body
+        velocity and height from a noisy IMU (250 Hz) + the servo encoders; "ekf_cam" - plus the
+        OAK-D Lite depth camera (rendered, ~17 ms per frame: slow, for evaluation more than training)."""
         scene = {"flat": "scene.xml", "rough": "scene_rough.xml"}.get(terrain, terrain)
         self.model = mujoco.MjModel.from_xml_path(os.path.join(HERE, scene))
         self.data = mujoco.MjData(self.model)
@@ -97,6 +103,8 @@ class RockyEnv(gym.Env):
         self.floor_id = m.geom("floor").id
         self.foot_geoms = np.array([m.geom(f"leg{n}_foot").id for n in range(1, 6)])
         self.body_geoms = {m.geom("c_chassis").id, m.geom("c_dome").id}
+        if mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "c_camera") >= 0:
+            self.body_geoms.add(m.geom("c_camera").id)
         self.leg_geoms = {g for g in range(m.ngeom) if m.geom_contype[g] and g not in self.body_geoms
                           and g not in set(self.foot_geoms) and g != self.floor_id}
         s = lambda name: m.sensor_adr[m.sensor(name).id]
@@ -120,7 +128,13 @@ class RockyEnv(gym.Env):
         if residual_around == "gait":
             from gait_demo import WaveGait
             self.gait = WaveGait("wave", period=1.0)
-        n_obs = 54 + (2 if residual_around == "gait" else 0)
+        assert estimator in ("none", "ekf", "ekf_cam"), estimator
+        self.estimator = estimator
+        self.est = self.imu = self.cam = None
+        self.imu_div = int(round(0.004 / m.opt.timestep))           # BNO085 raw reports at 250 Hz
+        self.cam_div = max(1, int(round(1.0 / camera_hz / control_dt)))
+        self.camera_latency = camera_latency
+        n_obs = 54 + (2 if residual_around == "gait" else 0) + (4 if estimator != "none" else 0)
         self.observation_space = spaces.Box(-np.inf, np.inf, (n_obs,), np.float32)
         self._renderer = None
         self._viewer = None
@@ -186,7 +200,45 @@ class RockyEnv(gym.Env):
         if self.residual_around == "gait":
             ph = 2 * math.pi * (self.step_count * self.control_dt / self.gait.period)
             obs = np.concatenate([obs, [math.sin(ph), math.cos(ph)]])
+        if self.est is not None:
+            obs = np.concatenate([obs, self.est.v_body(), [self.est.height() - self.base_z0]])
         return obs.astype(np.float32)
+
+    # ------------------------------------------------------------------ state estimator
+    def _reset_estimator(self):
+        import rocky_sensors as S
+        from rocky_estimator import Estimator, quat_exp, quat_mul
+        m, d = self.model, self.data
+        if self.imu is None:
+            self.imu = S.ImuModel(m, self.np_random)
+            t_bc = np.zeros(3)
+            if self.estimator == "ekf_cam":
+                from rocky_vision import GroundPlane, VisualOdometry
+                self.cam = S.DepthCamera(m, 160, 120, rng=self.np_random)
+                R_bc, t_bc = self.cam.extrinsics(d)
+                self.gp = GroundPlane(self.cam.intrinsics(), R_bc, t_bc)
+                self.vo = VisualOdometry(self.cam.intrinsics(), R_bc, t_bc)
+            self.est = Estimator(r_cam=t_bc)
+        self.imu.rng = self.np_random
+        self.imu.reset()
+        # boot: the robot starts still; attitude from the BNO085 to ~1 deg, heading taken as known
+        self.est.reset(p=(d.qpos[0], d.qpos[1], self.base_z0))
+        err = self.np_random.normal(0, math.radians(1.0), 3) * (1.0 if self.domain_rand else 0.0)
+        self.est.q = quat_mul(d.qpos[3:7].copy(), quat_exp(err))
+        if self.cam is not None:
+            self.cam.rng = self.np_random
+            self.vo.prev = None
+            self.cam_queue = deque()
+
+    def _estimator_camera(self):
+        d = self.data
+        if self.step_count % self.cam_div == 0:
+            depth, gray = self.cam.render(d)
+            self.cam_queue.append((d.time + self.camera_latency, self.gp.fit(depth), self.vo.update(d.time, gray, depth)))
+        while self.cam_queue and self.cam_queue[0][0] <= d.time + 1e-9:
+            _, plane, vo = self.cam_queue.popleft()
+            self.est.update_ground(plane)
+            self.est.update_vo(vo)
 
     # ------------------------------------------------------------------ gym API
     def reset(self, *, seed=None, options=None):
@@ -200,6 +252,8 @@ class RockyEnv(gym.Env):
         d.qpos[7:] += self.np_random.uniform(-0.05, 0.05, 15)
         d.ctrl[:] = self.q_stand
         mujoco.mj_forward(m, d)
+        if self.estimator != "none":
+            self._reset_estimator()
         self.command = self._sample_command() if not (options and "command" in options) else np.asarray(options["command"], float)
         self.last_action = np.zeros(15)
         self.last_last_action = np.zeros(15)
@@ -245,15 +299,25 @@ class RockyEnv(gym.Env):
         # latency: the target takes effect `latency_sub` physics steps late (calibration offset
         # moves where the servo thinks zero is)
         tgt = target - self.calib
-        if self.latency_sub == 0:
+        if self.latency_sub == 0 and self.est is None:
             d.ctrl[:] = tgt
             mujoco.mj_step(m, d, self.n_sub)
         else:
-            for _ in range(self.n_sub):
-                self.pending.append(tgt)
-                d.ctrl[:] = self.pending[0]
+            for i in range(self.n_sub):
+                if self.latency_sub:
+                    self.pending.append(tgt)
+                    d.ctrl[:] = self.pending[0]
+                else:
+                    d.ctrl[:] = tgt
                 mujoco.mj_step(m, d)
+                if self.est is not None and (i + 1) % self.imu_div == 0:
+                    g, acc = self.imu.sample(d)
+                    self.est.predict(g, acc, self.imu_div * m.opt.timestep)
         self.step_count += 1
+        if self.est is not None:
+            self.est.update_legs(self._measured_q(), self.control_dt)
+            if self.cam is not None:
+                self._estimator_camera()
 
         if self.domain_rand and d.time > self.next_push:
             d.qvel[:2] += self.np_random.uniform(-1, 1, 2) * self.dr["push_vel"]
@@ -306,6 +370,10 @@ class RockyEnv(gym.Env):
         obs = self._get_obs()
         info = {"terms": terms, "command": self.command.copy(), "v_body": v_body, "w_body": w_body,
                 "foot_contact": foot, "imu_acc": d.sensordata[self.adr_acc:self.adr_acc + 3].copy()}
+        if self.est is not None:
+            info["est_v_body"] = self.est.v_body()
+            info["est_height"] = self.est.height()
+            info["true_height"] = float(d.qpos[2])
         if self.render_mode == "human":
             self.render()
         return obs, float(reward), terminated, truncated, info
@@ -331,6 +399,9 @@ class RockyEnv(gym.Env):
             self._viewer.sync()
 
     def close(self):
+        if self.cam is not None:
+            self.cam.close()
+            self.cam = None
         if self._viewer is not None:
             self._viewer.close()
             self._viewer = None

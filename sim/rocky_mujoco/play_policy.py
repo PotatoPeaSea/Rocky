@@ -26,6 +26,8 @@ ap.add_argument("--seconds", type=float, default=60.0)
 ap.add_argument("--dr", action="store_true", help="keep domain randomisation on")
 ap.add_argument("--record", help="write an MP4 instead of opening a window")
 ap.add_argument("--residual", default="stand", choices=["stand", "gait"], help="must match training")
+ap.add_argument("--estimator", default="none", choices=["none", "ekf", "ekf_cam"],
+                help="must match training (ekf_cam can stand in for ekf: same observation)")
 ap.add_argument("--eval", action="store_true", help="headless: fixed commands, print tracking error and return")
 a = ap.parse_args()
 
@@ -51,7 +53,8 @@ def act_fn(obs):
 
 if a.eval:
     cmds = [(0, 0.08, 0), (0, -0.08, 0), (0.08, 0, 0), (-0.08, 0, 0), (0, 0, 0.4), (0, 0, 0)]
-    env = rocky_env.RockyEnv(terrain=a.terrain, domain_rand=a.dr, episode_seconds=10.0, residual_around=a.residual)
+    env = rocky_env.RockyEnv(terrain=a.terrain, domain_rand=a.dr, episode_seconds=10.0, residual_around=a.residual,
+                             estimator=a.estimator)
     tot = []
     for c in cmds:
         obs, _ = env.reset(seed=1, options={"command": c})
@@ -72,7 +75,7 @@ if a.eval:
     raise SystemExit
 
 env = rocky_env.RockyEnv(terrain=a.terrain, domain_rand=a.dr, episode_seconds=a.seconds, residual_around=a.residual,
-                         render_mode="rgb_array" if a.record else "human")
+                         estimator=a.estimator, render_mode="rgb_array" if a.record else "human")
 opts = {"command": a.cmd} if a.cmd else None
 obs, info = env.reset(seed=0, options=opts)
 frames, t0, ret = [], time.time(), 0.0

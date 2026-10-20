@@ -4,6 +4,7 @@
     python train_ppo.py --steps 200000 --n-envs 4        # quick sanity run
     python train_ppo.py --terrain rough --resume runs/ppo_rocky/latest.zip
     python train_ppo.py --residual gait --name ppo_gait    # RL corrections on top of the wave gait
+    python train_ppo.py --estimator ekf --name ppo_ekf     # policy also sees the EKF velocity / height
 
 Outputs (runs/<name>/): checkpoints, latest.zip, vecnormalize.pkl, progress.csv, TensorBoard logs
 (tensorboard --logdir runs). View a policy with play_policy.py.
@@ -25,10 +26,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMoni
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def make_env(rank, seed, terrain, domain_rand, residual):
+def make_env(rank, seed, terrain, domain_rand, residual, estimator="none"):
     def _f():
         import rocky_env
-        env = rocky_env.RockyEnv(terrain=terrain, domain_rand=domain_rand, seed=seed + rank, residual_around=residual)
+        env = rocky_env.RockyEnv(terrain=terrain, domain_rand=domain_rand, seed=seed + rank, residual_around=residual,
+                                 estimator=estimator)
         return env
     return _f
 
@@ -74,6 +76,8 @@ def main():
     ap.add_argument("--no-dr", action="store_true", help="disable domain randomisation")
     ap.add_argument("--residual", default="stand", choices=["stand", "gait"],
                     help="actions are offsets from the stand pose (pure RL) or from the open-loop wave gait")
+    ap.add_argument("--estimator", default="none", choices=["none", "ekf", "ekf_cam"],
+                    help="add the Kalman-filter velocity / height estimate to the observation")
     ap.add_argument("--name", default="ppo_rocky")
     ap.add_argument("--resume", help="path to a .zip to continue from")
     ap.add_argument("--seed", type=int, default=0)
@@ -82,7 +86,7 @@ def main():
 
     out = os.path.join(HERE, "runs", a.name)
     os.makedirs(out, exist_ok=True)
-    fns = [make_env(i, a.seed, a.terrain, not a.no_dr, a.residual) for i in range(a.n_envs)]
+    fns = [make_env(i, a.seed, a.terrain, not a.no_dr, a.residual, a.estimator) for i in range(a.n_envs)]
     venv = SubprocVecEnv(fns) if a.n_envs > 1 else DummyVecEnv(fns)
     venv = VecMonitor(venv)
     norm_path = os.path.join(out, "vecnormalize.pkl")

@@ -21,6 +21,10 @@ This is a MuJoCo model of Rocky (5 legs × 3 HX-30HM servos) built from the v5 F
 | `rocky_env.py` | Gymnasium env `Rocky-v0` (velocity-command tracking). |
 | `train_ppo.py` / `play_policy.py` | SB3 PPO on the CPU, then view or evaluate a policy. |
 | `rocky_mjx_env.py` / `train_mjx.py` | MuJoCo Playground-style JAX env and Brax PPO for the GPU. |
+| `rocky_estimator.py` | **Robot side.** Error-state Kalman filter: IMU + servo encoders (leg odometry) + depth camera. numpy only. |
+| `rocky_vision.py` | **Robot side.** Depth-camera measurements: ground-plane fit and RGB-D visual odometry (numpy + OpenCV). |
+| `rocky_sensors.py` | Sim only: OAK-D Lite depth render with stereo noise, BNO085 noise and bias. |
+| `estimate_demo.py` | Estimator benchmark against ground truth: IMU only vs IMU + legs vs IMU + legs + camera. |
 | `verify_model.py` | Model sanity checks: mass, limits, FK, 10 s stand, drop and thrash test. |
 | `make_media.py` | Renders `media/` offscreen. |
 
@@ -33,6 +37,8 @@ py -3.12 -m venv .venv            # Python 3.10-3.13 all work
 pip install -r requirements.txt   # mujoco, gymnasium, stable-baselines3 (+ CPU torch), imageio
 python verify_model.py            # should end with ALL PASS
 ```
+
+- **Verified on Windows 11 (2026-10-20)**: Python 3.12.10, MuJoCo 3.16.0, torch 2.14.1+cpu, SB3 2.9.0. `verify_model.py` ALL PASS; 300 k-step PPO run in 1.7 min (8 envs, ~3 k steps/s); offscreen camera rendering works.
 
 ## View
 
@@ -112,6 +118,71 @@ python play_policy.py zero --eval                      # baseline: just stand (o
   | observation noise | on |
   | velocity kicks | ±0.15 m/s every ~4 s |
 
+## Depth camera and state estimation (v7)
+
+The v7 model carries a **Luxonis OAK-D Lite** on the dome apex (CAD: `fusion/pentapod_camera_v7.py`, Fusion
+document "Pentapod Walker v7"). It looks along body −y, the gap between legs 3 and 4, pitched 15° down.
+USB-C goes straight down through the cap to a Pi 5 USB 3 port.
+
+![camera view](media/oakd_view.png)
+
+*Left: the camera's grey image; right: depth (darker = farther, black = no depth). Legs 3 and 4 are in the bottom corners; the visual odometry masks them out.*
+
+| | |
+|---|---|
+| MuJoCo camera | `oakd`, in body `camera`, at the RGB lens: (0, −38.9, 133.0) mm, fovy 58° (73 × 58° like the OV7251 stereo pair) |
+| Mass | 61 g camera + 14.4 g that the mount adds over the v6 apex cap: total **2.582 kg** |
+| Depth model (`rocky_sensors.DepthCamera`) | rendered depth → disparity (75 mm baseline, 640 px), 0.15 px noise, 1/8 px sub-pixel steps, 0.2–8 m, holes at depth edges + 2 % dropouts. Error: 0.3 % below 1 m, 1.4 % at 2–4 m, 2.5 % at 4–8 m (datasheet: < 2 % below 3 m). |
+| Cost | 160 × 120 depth + grey render and vision ≈ 17 ms per frame on this PC |
+
+### Estimator (`rocky_estimator.py`)
+
+A 15-state error-state Kalman filter (position, velocity, attitude, gyro bias, accel bias):
+
+| Source | Rate | Used for |
+|---|---|---|
+| BNO085 gyro + accelerometer | 250 Hz | prediction (strapdown, IMU lever arm) |
+| 15 servo encoders | 50 Hz | **leg odometry**: stance feet are still on the ground, so `v_body = −(ω × p_foot + ṗ_foot)` (FK of the measured angles), averaged over feet that agree with the median; **stance-foot height** → body height and tilt |
+| OAK-D Lite ground plane | 25 Hz | RANSAC plane under the robot → roll, pitch and height above the ground |
+| OAK-D Lite visual odometry | 25 Hz | KLT features lifted with depth, RANSAC rigid fit → body velocity and **rotation rate** (makes the gyro bias, and so yaw drift, observable) |
+
+- Camera measurements arrive 40 ms late. The filter compares them with its own state at capture time, kept in a short history.
+- Stance detection uses encoders only (low foot and not moving vertically), because HX-30HM load feedback is not confirmed. If the servos report load, pass `femur_load` to `update_legs`.
+- χ² gating drops slips and bad VO frames. After 5 rejected leg updates in a row, the gate is skipped, so a push cannot lock the filter out.
+- Absolute x, y and yaw are not observable from these sensors. They drift (slowly with the camera); a magnetometer or a map would be needed to fix them.
+
+```powershell
+python estimate_demo.py                    # 30 s: stand, sideways, forward, turn, diagonal, stop
+python estimate_demo.py --terrain rough
+python train_ppo.py --estimator ekf        # policy also sees the estimated body velocity + height
+python play_policy.py runs\ppo_rocky\latest.zip --estimator ekf_cam --eval   # same obs, camera in the loop
+```
+
+Results: `estimate_demo.py`, wave gait, 30 s of mixed commands, 1.65 m walked, truth speed 0.066 m/s RMS. Sensors: noisy and biased IMU, 12-bit encoders with ±1.5° calibration offsets, camera at 25 Hz with 40 ms latency.
+
+| Terrain | Estimator | v_xy RMSE | v_z RMSE | roll/pitch RMSE | height RMSE | xy drift | yaw drift |
+|---|---|---|---|---|---|---|---|
+| flat | IMU only | diverges (19.7 m/s) | 2.3 m/s | 8.3° | 8 m | 445 m | 15.6° |
+| flat | IMU + legs | 0.021 m/s | 0.019 m/s | 0.29° | 1.4 mm | 0.09 m | 24.5° |
+| flat | IMU + legs + camera | 0.021 m/s | 0.018 m/s | 0.26° | 1.3 mm | **0.02 m** | **3.8°** |
+| rough | IMU + legs | 0.033 m/s | 0.024 m/s | 0.74° | 4.2 mm | 0.23 m | 43.9° |
+| rough | IMU + legs + camera | 0.033 m/s | 0.024 m/s | 0.61° | 4.6 mm | **0.04 m** | **7.4°** |
+
+![estimator](media/estimator_flat.png)
+
+- The servo encoders do most of the work for velocity, tilt and height. The camera mainly removes drift: about 4–6× less position drift and yaw drift.
+- The remaining velocity error is mostly encoder quantisation (1.5 mrad on a ~0.2 m lever is ~15 mm/s per foot at 50 Hz) and the spikes at touchdown. Reading the servos at a higher rate, or using load feedback for contact, would lower it.
+- Inside `RockyEnv(estimator="ekf")` the throughput is ~780 steps/s on one core (2.6 k without the estimator). `ekf_cam` runs at ~120 steps/s, so use it for evaluation, not for training.
+
+### Training with the estimator (Windows CPU sanity runs, 2026-10-20)
+
+| Run | Steps | Time (8 envs) | ep_rew_mean | `play_policy --eval` | Zero-action baseline |
+|---|---|---|---|---|---|
+| `train_ppo.py --n-envs 8` (IMU obs, as before) | 300 k | 1.7 min, ~3.0 k steps/s | 19.1 â†’ 19.8 | 23.70 | 24.33 |
+| `train_ppo.py --n-envs 8 --estimator ekf` | 300 k | 2.7 min, ~1.85 k steps/s | 17.8 â†’ 20.2 | 24.25 (24.24 with `--estimator ekf_cam`) | 24.33 |
+
+Both runs show that the pipeline works end to end. At 300 k steps, neither policy does more than stand, which matches the earlier sanity runs. A walking policy still needs 10â€“50 M steps.
+
 ## GPU training (Linux or WSL2 with an NVIDIA GPU)
 
 ```bash
@@ -176,7 +247,8 @@ The leg angle is measured from body +x, counter-clockwise when seen from above. 
 | Control PCB (v6) | 65 g, a 75 × 75 × 12 mm box on the top plate (old WAGO hub spot) | Mid-point of 50–80 g; **move it in `build_model.py` once the PCB placement is fixed** |
 | Wiring, XT60, fuse | 60 g, spread around the plate | Estimate |
 | Magnets, tie rods | 38.3 g | Fusion (steel) |
-| **Total** | **2.507 kg**: base 1.305 kg; per leg: coxa 95.9 g, femur 93.1 g, tibia 51.3 g | |
+| OAK-D Lite + camera mount (v7) | 61 g + 14.4 g (mount volume 26.7 cm³ minus the 12.3 cm³ v6 cap, PLA × 0.8) | Datasheet; Fusion volume. Separate body `camera` |
+| **Total** | **2.582 kg** (v6: 2.507 kg): base 1.305 kg; camera 75.4 g; per leg: coxa 95.9 g, femur 93.1 g, tibia 51.3 g | |
 
 - Not included: the old v5 electronics (ESP32, BusLinker, Pololu, LM2596, WAGO hub), which v6 removes.
 - The IMU site uses the v5 BNO085 location (−48.3, 41.45, 60.5 mm). If the IMU moves to the PCB, move `site name="imu"`.
@@ -239,7 +311,9 @@ Both runs used 2 envs, 300 k steps, domain randomisation on, and `python train_p
 
 ## Not tested / known gaps
 
-- The Windows install and the interactive viewer (`view.py`, the gait demo without `--headless`) were not run here, because the container has no display. The same code paths ran headless.
+- The Windows install, CPU training and offscreen camera rendering were verified on Windows on 2026-10-20. The interactive viewer (`view.py`, the gait demo without `--headless`) was not opened.
+- The estimator and vision code have only run in simulation, not on the Pi 5 with a real OAK-D Lite. The VO under-reads pure constant-velocity motion by ~7 % in a noise-free test; during the gait its mean error is ≈ 0.
+- The MJX (GPU) env has no camera or estimator; it still matches the v6 interface.
 - The GPU path was only smoke-tested on CPU with the JAX backend (see above). It was not run on a GPU, and the Warp backend was not tried.
 - Servo kp, armature and friction are estimates. Fit them from a step response logged on the bench: command a step and read positions back at 1 Mbaud.
 - Backlash is not modelled. The latency, calibration-offset and encoder-quantisation hooks are in `rocky_env.py`.
