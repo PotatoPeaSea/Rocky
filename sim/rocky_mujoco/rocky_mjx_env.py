@@ -8,6 +8,10 @@ Differences from rocky_env.py (kept deliberately simple for MJX speed):
   * contacts: only the 5 foot spheres collide with the floor (body hulls / leg boxes are off);
     falls are detected from tilt and base height instead of a dome contact.
   * no encoder quantisation / latency buffer (add them once the basic policy trains).
+  * est_obs=True: the policy also gets [body velocity (3), height - stand height (1)] like
+    RockyEnv(estimator="ekf"). Instead of running the Kalman filter per env, it is the true value
+    plus the error measured for rocky_estimator.py in estimate_demo.py (white noise + a constant
+    per-episode bias), so the policy learns to cope with estimator error.
 """
 import os
 from typing import Any, Dict, Optional, Union
@@ -33,6 +37,10 @@ def default_config() -> config_dict.ConfigDict:
         naconmax=16 * 1024,
         njmax=64,
         noise=config_dict.create(gyro=0.05, gravity=0.02, qpos=0.003, qvel=0.3),
+        est_obs=False,
+        # estimate_demo.py, IMU + servos: v_xy RMSE 0.021 m/s, v_z 0.019 m/s, height 1.4 mm (incl. a
+        # ~1.5 mm calibration bias)
+        est_noise=config_dict.create(vel=0.018, vel_bias=0.008, height=0.0012, height_bias=0.0015),
         reward=config_dict.create(
             tracking_sigma=0.01, tracking_ang_sigma=0.1,
             scales=config_dict.create(
@@ -117,12 +125,18 @@ class RockyJoystick(mjx_env.MjxEnv):
         dq = dq + n.qvel * jax.random.normal(k[3], (15,))
         state = jp.concatenate([gyro, grav, q, dq, info["last_act"], info["command"]])
         v_world = data.qvel[0:3]
+        if self._config.est_obs:
+            e = self._config.est_noise
+            ke = jax.random.split(k[3], 2)
+            v_est = R.T @ v_world + info["est_bias"][:3] + e.vel * jax.random.normal(ke[0], (3,))
+            h_est = data.qpos[2] - self._base_z + info["est_bias"][3] + e.height * jax.random.normal(ke[1])
+            state = jp.concatenate([state, v_est, jp.array([h_est])])
         privileged = jp.concatenate([state, R.T @ v_world, data.qvel[3:6], jp.array([data.qpos[2]])])
         return {"state": state, "privileged_state": privileged}
 
     # ---------------- API
     def reset(self, rng: jax.Array) -> mjx_env.State:
-        rng, k1, k2, k3, k4 = jax.random.split(rng, 5)
+        rng, k1, k2, k3, k4, k5 = jax.random.split(rng, 6)
         qpos = self._init_q
         yaw = jax.random.uniform(k1, minval=-jp.pi, maxval=jp.pi)
         qpos = qpos.at[3:7].set(jp.array([jp.cos(yaw / 2), 0.0, 0.0, jp.sin(yaw / 2)]))
@@ -132,7 +146,9 @@ class RockyJoystick(mjx_env.MjxEnv):
                                  njmax=self._config.njmax)
         data = mjx.forward(self.mjx_model, data)
         info = {"rng": rng, "command": self._sample_cmd(k3), "last_act": jp.zeros(15),
-                "feet_air_time": jp.zeros(5), "last_contact": jp.ones(5, dtype=bool), "step": 0}
+                "feet_air_time": jp.zeros(5), "last_contact": jp.ones(5, dtype=bool), "step": 0,
+                "est_bias": jax.random.normal(k5, (4,)) * jp.array([self._config.est_noise.vel_bias] * 3
+                                                                   + [self._config.est_noise.height_bias])}
         metrics = {f"reward/{k}": jp.zeros(()) for k in self._config.reward.scales.keys()}
         obs = self._obs(data, info, k4)
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)

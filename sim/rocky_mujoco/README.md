@@ -183,16 +183,24 @@ Results: `estimate_demo.py`, wave gait, 30 s of mixed commands, 1.65 m walked, t
 
 Both runs show that the pipeline works end to end. At 300 k steps, neither policy does more than stand, which matches the earlier sanity runs. A walking policy still needs 10â€“50 M steps.
 
-## GPU training (Linux or WSL2 with an NVIDIA GPU)
+## GPU training (WSL2 + NVIDIA GPU)
 
-```bash
-# in WSL2 Ubuntu (the Windows NVIDIA driver is enough; no CUDA install needed on the Windows side)
-python3 -m venv ~/rocky && source ~/rocky/bin/activate
-pip install "jax[cuda12]==0.9.2" mujoco mujoco-mjx playground brax mediapy   # jax 0.12 breaks brax 0.14.2
-cd /mnt/c/Users/smart/Documents/Pentapod/sim/rocky_mujoco
-python train_mjx.py --smoke                                  # compile check
-python train_mjx.py --num-timesteps 100000000 --num-envs 4096 # or --impl warp on RTX 30/40/50
+Set up and run from Windows. The scripts live in this folder; the venv is `~/rocky` inside WSL.
+
+```powershell
+wsl -d Ubuntu -- bash /mnt/c/Users/smart/Documents/Pentapod/rocky/sim/rocky_mujoco/wsl_setup.sh      # once, no sudo
+wsl -d Ubuntu -- bash /mnt/c/Users/smart/Documents/Pentapod/rocky/sim/rocky_mujoco/wsl_run.sh train_mjx.py --smoke
+wsl -d Ubuntu -- bash /mnt/c/Users/smart/Documents/Pentapod/rocky/sim/rocky_mujoco/wsl_run.sh train_mjx.py --num-timesteps 100000000 --est-obs --name mjx_big
 ```
+
+- `wsl_setup.sh`: uv-provided Python 3.12 (Ubuntu 26.04 ships 3.14), then JAX 0.9.2 + CUDA 12, MuJoCo/MJX 3.16, MuJoCo Warp 3.16, Brax 0.14.2, Playground 0.2.0, and an ffmpeg for the videos. It uses pip, not `uv pip`, because uv rejects some NVIDIA wheels.
+- `wsl_run.sh`: turns off JAX's 75 % VRAM preallocation (Windows apps already hold ~8 GB of the 3060's 12 GB), filters XLA's harmless WSL driver-version log spam, and tees output to `runs/wsl_last.log`.
+- Outputs go to `runs/<name>/`:
+  - `params.pkl` (final) and `params_latest.pkl` (updated at every eval);
+  - `progress.csv`, `config.json`;
+  - **`videos/step_XXXXXXXk.mp4`**: a 9 s clip with the tracking camera and a fixed command script (forward, sideways, turn). One is recorded before training starts, one after each of the `--num-evals` evals, and one at the end.
+- `--est-obs` gives the policy the Kalman-filter body velocity and height (true value + the measured estimator error), the same 4 inputs as `RockyEnv(estimator="ekf")`.
+- Measured on the RTX 3060 (2026-10-20), 4096 envs, JAX backend: **~7 k env steps/s** including evals (5.9 M steps in 18 min). 100 M steps is about 4 h.
 
 - `rocky_mjx_env.RockyJoystick` uses the same robot, the same 50 Hz interface, observations and reward as the CPU env.
 - Simplifications for speed:
