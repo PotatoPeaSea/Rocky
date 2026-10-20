@@ -199,6 +199,8 @@ wsl -d Ubuntu -- bash /mnt/c/Users/smart/Documents/Pentapod/rocky/sim/rocky_mujo
   - `params.pkl` (final) and `params_latest.pkl` (updated at every eval);
   - `progress.csv`, `config.json`;
   - **`videos/step_XXXXXXXk.mp4`**: a 9 s clip with the tracking camera and a fixed command script (forward, sideways, turn). One is recorded before training starts, one after each of the `--num-evals` evals, and one at the end.
+- **Live window**: `wsl -d Ubuntu -- bash .../wsl_watch.sh runs/<name>` shows the newest clip looping plus the eval-reward curve and ETA, and updates at every checkpoint. Left/right keys browse older clips; End goes back to the newest. It runs inside WSL (drawn by WSLg) because Windows can run out of RAM during training; `python watch_training.py` works the same on Windows. Add `--record out.mp4` to save one loop of the window.
+- `wsl_record_dashboard.sh runs/<name> 100 200` saves those window recordings automatically when the run passes 100 M and 200 M steps, and when it finishes.
 - `--est-obs` gives the policy the Kalman-filter body velocity and height (true value + the measured estimator error), the same 4 inputs as `RockyEnv(estimator="ekf")`.
 - Measured on the RTX 3060 (2026-10-20), 4096 envs, JAX backend: **~7 k env steps/s** including evals (5.9 M steps in 18 min). 100 M steps is about 4 h.
 
