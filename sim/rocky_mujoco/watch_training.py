@@ -65,17 +65,19 @@ def main():
 
     def load(i):
         try:
-            st["frames"] = iio.imread(st["videos"][i])
+            p = st["videos"][i]
+            st["frames"] = iio.imread(p)
             st["idx"], st["k"] = i, 0
+            st["loaded"] = (p, os.path.getmtime(p))
         except Exception:               # still being written
             pass
 
     def poll():
         vids = sorted(glob.glob(os.path.join(run, "videos", "step_*.mp4")))
-        if vids != st["videos"]:
-            st["videos"] = vids
-            if st["follow"] and vids and (time.time() - os.path.getmtime(vids[-1])) > 3:
-                load(len(vids) - 1)
+        st["videos"] = vids
+        # follow the newest clip; retried every poll until it loads (a clip < 3 s old may still be written)
+        if st["follow"] and vids and st.get("loaded") != (vids[-1], os.path.getmtime(vids[-1]))                 and time.time() - os.path.getmtime(vids[-1]) > 3:
+            load(len(vids) - 1)
         rows = read_progress(run)
         if rows:
             x = [r["step"] / 1e6 for r in rows]
