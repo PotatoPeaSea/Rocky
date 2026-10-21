@@ -179,3 +179,103 @@ class VisualOdometry:
         self.last = {"tracks": n, "inliers": best_k, "resid_m": float(resid.mean())}
         return {"v_cam_body": self.R @ v_c, "w_body": self.R @ w_c, "dt": dt, "t_mid": t0 + dt / 2,
                 "inliers": best_k, "tracks": n}
+
+
+class ElevationMap:
+    """Robot-centric terrain height map built from depth frames and the estimator's pose: the robot
+    side of the policy's height scan (rocky_mjx_env scan="camera").
+
+    A square grid of `res` cells in the odometry (world) frame, `size` metres across, recentred on the
+    robot when it moves more than a quarter of the way to the edge. Each depth point lands in its cell
+    as a height measurement with variance (sigma0 + sigma_per_m * range)^2; cells fuse them by inverse
+    variance. A measurement far outside a cell's spread (a step that moved, a stale or mixed-pixel
+    cell) restarts that cell. Points within self_radius of the base (the robot's own legs) are skipped.
+
+      insert(depth, p_wb, R_wb)    -> fuse one frame (pose of the body in the odometry frame)
+      scan(p_wb, R_wb, grid_xy)    -> (heights of the base above the ground at the grid points,
+                                       known-mask); grid_xy is in the body-yaw frame, like the policy's
+    """
+
+    def __init__(self, intr, R_bc, t_bc, res=0.02, size=3.0, step=2, max_range=3.0, min_range=0.2,
+                 sigma0=0.004, sigma_per_m=0.004, self_radius=0.28, gate=4.0, gate_floor=0.015):
+        self.intr, self.R, self.t = intr, np.asarray(R_bc), np.asarray(t_bc)
+        self.res, self.n = res, int(round(size / res))
+        self.step, self.max_range, self.min_range = step, max_range, min_range
+        self.s0, self.s1, self.self_r = sigma0, sigma_per_m, self_radius
+        self.gate, self.gate_floor = gate, gate_floor
+        self.origin = None                                  # world xy of cell (0, 0)'s corner
+        self.reset()
+
+    def reset(self):
+        self.w = np.zeros((self.n, self.n))                 # sum of inverse variances (0 = unknown)
+        self.wz = np.zeros((self.n, self.n))                # sum of z / variance
+        self.origin = None
+
+    def _recentre(self, xy):
+        half = self.n * self.res / 2
+        if self.origin is None:
+            self.origin = np.floor((xy - half) / self.res) * self.res
+            return
+        c = self.origin + half
+        if np.all(np.abs(xy - c) < half / 2):
+            return
+        new = np.floor((xy - half) / self.res) * self.res
+        d = np.round((new - self.origin) / self.res).astype(int)     # cells shifted (x, y)
+        for a in (self.w, self.wz):
+            a[:] = np.roll(a, (-d[1], -d[0]), axis=(0, 1))
+            if d[1] > 0: a[-d[1]:, :] = 0
+            if d[1] < 0: a[:-d[1], :] = 0
+            if d[0] > 0: a[:, -d[0]:] = 0
+            if d[0] < 0: a[:, :-d[0]] = 0
+        self.origin = new
+
+    def insert(self, depth, p_wb, R_wb):
+        p_wb, R_wb = np.asarray(p_wb), np.asarray(R_wb)
+        self._recentre(p_wb[:2])
+        z = np.where((depth > self.min_range) & (depth < self.max_range), depth, 0.0)
+        pc = backproject(z, self.intr, self.step)
+        if len(pc) == 0:
+            return 0
+        pb = pc @ self.R.T + self.t
+        keep = np.hypot(pb[:, 0], pb[:, 1]) > self.self_r
+        pc, pb = pc[keep], pb[keep]
+        pw = pb @ R_wb.T + p_wb
+        var = (self.s0 + self.s1 * pc[:, 2]) ** 2
+        ij = np.floor((pw[:, :2] - self.origin) / self.res).astype(int)
+        ok = (ij >= 0).all(1) & (ij < self.n).all(1)
+        ij, h, var = ij[ok], pw[ok, 2], var[ok]
+        flat = ij[:, 1] * self.n + ij[:, 0]
+        # per-cell frame mean first (many points per cell up close), then one fused update per cell
+        cnt = np.bincount(flat, minlength=self.n * self.n)
+        iv = np.bincount(flat, 1.0 / var, minlength=self.n * self.n)
+        ivz = np.bincount(flat, h / var, minlength=self.n * self.n)
+        hit = cnt > 0
+        w, wz = self.w.reshape(-1), self.wz.reshape(-1)
+        fz = ivz[hit] / iv[hit]
+        fvar = cnt[hit] / iv[hit]                           # per-point variance: frames share bias, not noise
+        old = w[hit] > 0
+        mz = np.where(old, wz[hit] / np.maximum(w[hit], 1e-12), fz)
+        spread = np.sqrt(1.0 / np.maximum(w[hit], 1e-12) + fvar)
+        restart = old & (np.abs(fz - mz) > np.maximum(self.gate * spread, self.gate_floor))
+        idx = np.flatnonzero(hit)
+        w[idx[restart]], wz[idx[restart]] = 0.0, 0.0
+        w[idx] += 1.0 / fvar
+        wz[idx] += fz / fvar
+        return int(hit.sum())
+
+    def height(self, xy):
+        """(terrain height, known) at world xy (..., 2), nearest cell."""
+        ij = np.floor((np.asarray(xy) - self.origin) / self.res).astype(int)
+        ok = (ij >= 0).all(-1) & (ij < self.n).all(-1)
+        ij = np.clip(ij, 0, self.n - 1)
+        w = self.w[ij[..., 1], ij[..., 0]]
+        known = ok & (w > 0)
+        return np.where(known, self.wz[ij[..., 1], ij[..., 0]] / np.maximum(w, 1e-12), 0.0), known
+
+    def scan(self, p_wb, R_wb, grid_xy):
+        yaw = math.atan2(R_wb[1, 0], R_wb[0, 0])
+        c, s = math.cos(yaw), math.sin(yaw)
+        pts = np.asarray(p_wb)[:2] + np.asarray(grid_xy) @ np.array([[c, s], [-s, c]])
+        h, known = self.height(pts)
+        out = np.clip(p_wb[2] - h, -0.5, 0.5)
+        return np.where(known, out, 0.0), known.astype(np.float32)
