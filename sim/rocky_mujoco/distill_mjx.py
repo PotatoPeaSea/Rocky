@@ -67,6 +67,10 @@ def main():
     assert targs.get("scan") == "true", "the teacher must be a --scan true run"
     cfg = R.default_config()
     cfg.impl, cfg.est_obs, cfg.scan = "warp", targs.get("est_obs", False), "camera"
+    tcfg = json.load(open(os.path.join(HERE, a.teacher, "config.json"))).get("env_config", {})
+    cfg.gait.enabled = "gait" in tcfg and tcfg["gait"]["enabled"]      # same gait clock as the teacher
+    if cfg.gait.enabled:
+        cfg.gait.update({k: tuple(v) if isinstance(v, list) else v for k, v in tcfg["gait"].items()})
     cfg.naconmax, cfg.njmax = 64 * a.num_envs, 160
     env = R.RockyJoystick(terrain="curriculum", config=cfg)
     ecfg = R.default_config(); ecfg.update(cfg.to_dict()); ecfg.naconmax = 64 * 128

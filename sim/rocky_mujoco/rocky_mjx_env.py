@@ -65,13 +65,25 @@ def default_config() -> config_dict.ConfigDict:
         est_noise=config_dict.create(vel=0.018, vel_bias=0.008, height=0.0012, height_bias=0.0015),
         reward=config_dict.create(
             tracking_sigma=0.01, tracking_ang_sigma=0.1,
+            # second, sharp velocity term: the coarse one above pays 78 % for being 5 cm/s off, so on its
+            # own the policy settled for half the commanded speed; the sharp one alone (0.0025) gave no
+            # gradient from standing and the policy marched in place (gait2)
+            tracking_sigma_fine=0.001,
             scales=config_dict.create(
                 tracking_lin_vel=2.0, tracking_ang_vel=1.0, lin_vel_z=-2.0, ang_vel_xy=-0.05,
-                orientation=-5.0, base_height=-50.0, torques=-0.002, action_rate=-0.01,
-                feet_air_time=1.0, dof_pos_limits=-5.0, termination=-50.0, alive=0.2,
+                orientation=-5.0, base_height=-50.0, torques=-0.002, action_rate=-0.02,
+                feet_air_time=0.0, dof_pos_limits=-5.0, termination=-50.0, alive=0.2,
+                # gait shaping (gait.enabled): follow the swing schedule, lift swing feet to the target
+                # height, no sliding stance feet, no high-frequency jitter (2nd difference of the action)
+                tracking_lin_vel_fine=2.0,
+                gait_contact=1.5, feet_clearance=-500.0, foot_slip=-10.0, action_acc=-0.02, dof_acc=-2.5e-6,
             ),
         ),
-        command=config_dict.create(vx=0.12, vy=0.12, wz=0.5),
+        command=config_dict.create(vx=0.25, vy=0.25, wz=0.8),
+        # gait clock: legs swing in the order 1, 3, 5, 2, 4 (two non-adjacent legs at a time, three on the
+        # ground), each for `swing` of the cycle; the policy sees the phase. Off for runs made before it.
+        gait=config_dict.create(enabled=True, freq=1.5, swing=0.4, offsets=(0.0, 0.6, 0.2, 0.8, 0.4),
+                                clearance=0.035, terrain_clearance=0.05),
         # terrain="curriculum" only
         curriculum=config_dict.create(init_max_level=2, up_frac=0.7, down_frac=0.35, min_expected=0.4),
         terrain_scales=config_dict.create(base_height=0.0, orientation=-2.0, collision=-1.0, belly=-1.0),
@@ -81,7 +93,7 @@ def default_config() -> config_dict.ConfigDict:
         # 1 cm in height and 1 cm in xy (EKF drift over a few metres), memory 4 s
         cam_map=config_dict.create(noise=0.004, noise_per_m=0.004, bias=0.01, xy_bias=0.01, hist=40, every=5,
                                    min_range=0.2, max_range=3.0, hfov_deg=73.0, vfov_deg=58.0),
-        cam_command=config_dict.create(speed_min=0.03, speed_max=0.12, half_angle_deg=45.0, wz=0.3),
+        cam_command=config_dict.create(speed_min=0.05, speed_max=0.25, half_angle_deg=45.0, wz=0.5),
     )
 
 
@@ -124,6 +136,7 @@ class RockyJoystick(mjx_env.MjxEnv):
         self._hi = jp.array(m.jnt_range[1:, 1])
         self._base_z = float(m.key_qpos[key][2])
         self._foot_geoms = np.array(feet)
+        self._foot_r = float(m.geom_size[feet[0]][0])
         self._floor = floor
         self._imu = m.site("imu").id
         self._gyro_adr = m.sensor_adr[m.sensor("imu_gyro").id]
@@ -271,6 +284,9 @@ class RockyJoystick(mjx_env.MjxEnv):
         q = q + n.qpos * jax.random.normal(k[2], (15,))
         dq = dq + n.qvel * jax.random.normal(k[3], (15,))
         state = jp.concatenate([gyro, grav, q, dq, info["last_act"], info["command"]])
+        if self._config.gait.enabled:
+            ph = 2 * jp.pi * info["phase"]
+            state = jp.concatenate([state, jp.array([jp.sin(ph), jp.cos(ph)])])
         v_world = data.qvel[0:3]
         if self._config.est_obs:
             e = self._config.est_noise
@@ -312,6 +328,8 @@ class RockyJoystick(mjx_env.MjxEnv):
         data = mjx.forward(self.mjx_model, data)
         info = {"rng": rng, "command": self._sample_cmd(k3), "last_act": jp.zeros(15),
                 "feet_air_time": jp.zeros(5), "last_contact": jp.ones(5, dtype=bool), "step": 0,
+                "phase": jax.random.uniform(k2), "last_act2": jp.zeros(15), "last_dq": jp.zeros(15),
+                "last_feet": data.geom_xpos[self._foot_geoms][:, 0:2],
                 "est_bias": jax.random.normal(k5, (4,)) * jp.array([self._config.est_noise.vel_bias] * 3
                                                                    + [self._config.est_noise.height_bias])}
         if self._curriculum:
@@ -338,6 +356,9 @@ class RockyJoystick(mjx_env.MjxEnv):
 
     def _scales(self):
         sc = dict(self._config.reward.scales)
+        if not self._config.gait.enabled:
+            for k in ("gait_contact", "feet_clearance", "foot_slip", "action_acc", "dof_acc"):
+                sc.pop(k, None)
         if self._curriculum:
             sc.update(dict(self._config.terrain_scales))
         return sc
@@ -382,6 +403,7 @@ class RockyJoystick(mjx_env.MjxEnv):
         terms = {
             "tracking_lin_vel": jp.exp(-jp.sum((cmd[:2] - v[:2]) ** 2) / cfg.reward.tracking_sigma),
             "tracking_ang_vel": jp.exp(-((cmd[2] - w[2]) ** 2) / cfg.reward.tracking_ang_sigma),
+            "tracking_lin_vel_fine": jp.exp(-jp.sum((cmd[:2] - v[:2]) ** 2) / cfg.reward.tracking_sigma_fine),
             "lin_vel_z": v[2] ** 2,
             "ang_vel_xy": jp.sum(w[:2] ** 2),
             "orientation": jp.sum(grav[:2] ** 2),
@@ -393,6 +415,27 @@ class RockyJoystick(mjx_env.MjxEnv):
             "termination": done.astype(jp.float32),
             "alive": jp.ones(()),
         }
+        if cfg.gait.enabled:
+            g = cfg.gait
+            ph = jp.mod(info["phase"] + jp.array(g.offsets), 1.0)            # per-leg phase
+            swing = (ph < g.swing) & moving                                  # scheduled swing legs
+            feet = data.geom_xpos[self._foot_geoms]
+            ground = self._ground(feet[:, 0:2]) if self._curriculum else jp.zeros(5)
+            clr = feet[:, 2] - self._foot_r - ground
+            h = g.terrain_clearance if self._curriculum else g.clearance
+            h_des = jp.where(swing, h * jp.sin(jp.pi * jp.clip(ph / g.swing, 0.0, 1.0)), 0.0)   # stance: on the ground
+            fv = jp.minimum(jp.sum(((feet[:, 0:2] - info["last_feet"]) / self.dt) ** 2, axis=1), 1.0)
+            terms["gait_contact"] = jp.mean((contact == ~swing).astype(jp.float32))
+            terms["feet_clearance"] = jp.sum(jp.minimum(clr - h_des, 0.1) ** 2)
+            # feet planted this step and the last: a foot touching down still moves at swing speed (gait3
+            # counted that as slip and learned to take tiny, slow steps)
+            terms["foot_slip"] = jp.sum((contact & info["last_contact"]) * fv)
+            terms["action_acc"] = jp.sum((action - 2 * info["last_act"] + info["last_act2"]) ** 2)
+            terms["dof_acc"] = jp.sum(((data.qvel[6:] - info["last_dq"]) / self.dt) ** 2)
+            info["phase"] = jp.mod(info["phase"] + g.freq * self.dt, 1.0)
+            info["last_feet"] = feet[:, 0:2]
+            info["last_dq"] = data.qvel[6:]
+            info["last_act2"] = info["last_act"]
         if self._curriculum:
             terms["collision"] = jp.sum(data.sensordata[self._leg_hit_adr] > 0).astype(jp.float32)
             terms["belly"] = (data.sensordata[self._belly_adr] > 0).astype(jp.float32)

@@ -21,6 +21,7 @@ if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
 import argparse
 import csv
 import functools
+import json
 import pickle
 import time
 
@@ -40,6 +41,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VIDEO_CMDS = [(3.0, (0.0, 0.08, 0.0), "forward 8 cm/s (toward leg 1)", None),
               (3.0, (0.08, 0.0, 0.0), "sideways 8 cm/s", None),
               (3.0, (0.0, 0.0, 0.4), "turn 0.4 rad/s", None)]
+# runs with the gait clock: a slow and a fast walk, so the step pattern and speed range both show
+GAIT_VIDEO_CMDS = [(3.0, (0.0, 0.10, 0.0), "forward 10 cm/s (toward leg 1)", None),
+                   (3.0, (0.0, 0.20, 0.0), "forward 20 cm/s", None),
+                   (3.0, (0.15, 0.0, 0.0), "sideways 15 cm/s", None),
+                   (3.0, (0.0, 0.0, 0.6), "turn 0.6 rad/s", None)]
 # terrain runs: the same three showcase tiles in every clip, walking off the spawn pad at 10 cm/s
 TERRAIN_VIDEO_CMDS = [(5.0, (0.0, 0.10, 0.0), "rocks up to 5 cm (level 9)", ("rough", 9)),
                       (6.0, (0.0, 0.10, 0.0), "climbing 4.3 cm stairs (level 6)", ("stairs_dn", 6)),
@@ -118,6 +124,9 @@ def main():
     ap.add_argument("--smoke", action="store_true", help="tiny run (CPU ok) to test the pipeline")
     ap.add_argument("--num-evals", type=int, default=10, help="evals = checkpoints = progress videos (plus step 0)")
     ap.add_argument("--no-video", action="store_true", help="skip the progress videos")
+    ap.add_argument("--no-gait", action="store_true", help="no gait clock / gait-shaping rewards (runs before 2026-10-21)")
+    ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE",
+                    help="env config overrides, e.g. reward.scales.feet_clearance=-300 gait.freq=2.0")
     a = ap.parse_args()
     if a.smoke:
         a.num_timesteps, a.num_envs = 20_000, 32
@@ -128,6 +137,13 @@ def main():
     cfg.impl = a.impl
     cfg.est_obs = a.est_obs
     cfg.scan = a.scan
+    cfg.gait.enabled = not a.no_gait
+    for kv in a.set:
+        k, v = kv.split("=", 1)
+        node = cfg
+        for part in k.split(".")[:-1]:
+            node = node[part]
+        node[k.split(".")[-1]] = type(node[k.split(".")[-1]])(json.loads(v))
     # Warp allocates contacts in ONE pool for all envs of a batch; when it runs out, the envs that come last
     # silently lose contacts and fall through the ground (seen on the terrain with 24 / env, so 64 / env:
     # contacts are cheap). njmax (constraint rows per env) is what costs memory: the solver keeps
@@ -152,6 +168,11 @@ def main():
         r = {"step": step, "time_s": round(time.time() - t0, 1),
              "eval_reward": float(metrics.get("eval/episode_reward", np.nan)),
              "eval_len": float(metrics.get("eval/avg_episode_length", np.nan))}
+        # what each reward term contributed to the eval episode (term sum x scale x dt)
+        scales = env._scales()
+        for k, v in sorted(metrics.items()):
+            if k.startswith("eval/episode_reward/") and k.split("/")[-1] in scales:
+                r["r_" + k.split("/")[-1]] = round(float(v) * scales[k.split("/")[-1]] * env.dt, 3)
         rows.append(r)
         print(r, flush=True)
         with open(os.path.join(out, "progress.csv"), "w", newline="") as f:
@@ -162,7 +183,7 @@ def main():
     holder = {}
     recorder = None if a.no_video else VideoRecorder(
         eval_env, holder, os.path.join(out, "videos"),
-        (TERRAIN_VIDEO_CMDS_CAM if a.scan != "none" else TERRAIN_VIDEO_CMDS) if a.terrain == "curriculum" else VIDEO_CMDS)
+        (TERRAIN_VIDEO_CMDS_CAM if a.scan != "none" else TERRAIN_VIDEO_CMDS) if a.terrain == "curriculum" else (VIDEO_CMDS if a.no_gait else GAIT_VIDEO_CMDS))
 
     def checkpoint(step, make_policy, params):        # brax: once before training (step 0) and after every eval
         finite = all(bool(np.all(np.isfinite(np.asarray(x)))) for x in jax.tree_util.tree_leaves(params)
@@ -183,7 +204,6 @@ def main():
             except Exception as e:      # rendering needs EGL/OSMesa; never kill a long run over a video
                 print("video skipped:", e, flush=True)
 
-    import json
     with open(os.path.join(out, "config.json"), "w") as f:
         json.dump({"args": vars(a), "env_config": cfg.to_dict()}, f, indent=1)
 

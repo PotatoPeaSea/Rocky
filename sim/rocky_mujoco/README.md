@@ -26,6 +26,7 @@ This is a MuJoCo model of Rocky (5 legs × 3 HX-30HM servos) built from the v5 F
 | `rocky_terrain.py` | Terrain curriculum heightfield (rocks, slopes, stairs, blocks; 10 levels). |
 | `eval_mjx.py` | Scores a GPU policy: flat velocity tracking, or success per terrain type and level (`--terrain`, `--dir=-y` to walk camera-first). |
 | `distill_mjx.py` | Teacher-student (DAgger): a policy on the simulated OAK-D height map learns from one trained on exact heights. |
+| `gait_check.py` | Gait quality of a GPU policy: speed, stride, per-leg step rate, foot lift, jitter, slip, a foot-contact diagram and a close-up video. |
 | `elevation_demo.py` / `compare_stairs.py` | Height map vs ground truth on the CPU; side-by-side stair-climbing video of several policies. |
 | `rocky_sensors.py` | Sim only: OAK-D Lite depth render with stereo noise, BNO085 noise and bias. |
 | `estimate_demo.py` | Estimator benchmark against ground truth: IMU only vs IMU + legs vs IMU + legs + camera. |

@@ -44,6 +44,10 @@ def load(run, terrain=None, n_envs=3072):
     cfg.impl = args["impl"]
     cfg.est_obs = args.get("est_obs", False)
     cfg.scan = args.get("scan", "none")
+    saved = cfgj.get("env_config", {})
+    cfg.gait.enabled = "gait" in saved and saved["gait"]["enabled"]     # runs before the gait clock had none
+    if cfg.gait.enabled:
+        cfg.gait.update({k: tuple(v) if isinstance(v, list) else v for k, v in saved["gait"].items()})
     cfg.naconmax = n_envs * (64 if terrain == "curriculum" else 10)   # contacts for all eval envs (one batch)
     cfg.njmax = 4 * (64 if terrain == "curriculum" else 10) + 16
     env = R.RockyJoystick(terrain=terrain, config=cfg)

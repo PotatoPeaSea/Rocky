@@ -276,3 +276,57 @@ Prompted by the user watching `compare_stairs_L3.mp4` ("it's not climbing the st
 - **Slow by design, too:** commands only go up to 12 cm/s. The servos (5.5 rad/s no-load) allow more.
 
 **Cause:** the reward only asks for velocity tracking, staying upright and alive; the gait-shaping terms are tiny (`action_rate` -0.01, `torques` -0.002, `feet_air_time` +1.0 with a 0.2 s threshold). Nothing asks for regular, symmetric, high, smooth steps, so PPO found a jittery shuffle that tracks the velocity.
+
+## Step 5: a real gait on flat ground: `runs/gait1` → `runs/gait4`
+
+Four 100 M-step flat runs (≈ 20 min each), each checked with **`gait_check.py`**. For one deterministic rollout per command (no randomisation), it measures speed, stride, step rate per leg, how evenly the legs share the work, swing-foot height, joint jitter and slip of planted feet. It also draws a foot-contact diagram and records a close-up side video that follows the robot.
+
+```
+train_mjx.py --num-timesteps 100000000 --num-envs 4096 --impl warp --est-obs --num-evals 8 --name gait4
+python gait_check.py runs/gait4
+```
+
+**What was added to the env** (`rocky_mjx_env.py`; the old behaviour is `--no-gait`; runs made before this have no `gait` entry in their config and load without it):
+- **Gait clock:** a 1.5 Hz phase in the observation. Each leg has a 40 % swing window, in the order 1, 3, 5, 2, 4, so two non-adjacent legs swing at a time and three are always down. With a zero command, all feet are meant to stay down.
+- **New reward terms:**
+  - `gait_contact`: feet on the ground or in the air when the schedule says so;
+  - `feet_clearance`: swing feet follow a 3.5 cm half-sine (5 cm on terrain), and stance feet stay on the ground;
+  - `foot_slip`: penalty on planted feet moving;
+  - `action_acc`: penalty on the second difference of the action (high-frequency jitter);
+  - `dof_acc`: penalty on joint acceleration.
+- **Commands:** up to 25 cm/s (was 12) and 0.8 rad/s.
+- **Velocity tracking in two terms:** a loose one (σ² = 0.01) for a gradient from standing, and a sharp one (σ² = 0.001) for actually reaching the speed.
+- `train_mjx.py` writes each reward term's contribution to `progress.csv` (`r_*` columns) and takes `--set key=value` config overrides.
+
+| Run | What changed | What happened |
+|---|---|---|
+| old `mjx_300m` | — | Skates: legs 1-3 never lift, leg 4 paddles at 4-11 Hz, feet rise 6 mm and slide as fast as the body moves, joints reverse 13-23 times/s |
+| `gait1` | gait clock + terms above, slip −10, schedule weight 1 | Regular stepping on 4 legs, but **leg 4 is held in the air the whole time**: it cost only ~2 reward per episode and saved slip and acceleration penalties. Reaches 14 of 20 cm/s |
+| `gait2` | stance feet must stay down, schedule weight 3, sharp velocity tracking only, slip −30 | **Marches in place** (0.2-0.9 cm/s). The sharp tracking term gives no gradient from standing still, and the schedule pays well for stepping on the spot |
+| `gait3` | loose + sharp tracking, schedule weight 1.5 | Moves, but slowly (4-6 cm/s at 72 M). The slip term also charged a foot touching down at swing speed, so long fast steps were expensive |
+| **`gait4`** | slip counted only for feet planted this step and the last, back to −10 | **Walks properly** (table below) |
+
+`gait_check.py` results, old flat policy → `gait4`:
+
+| Command | speed | stride | step rate, legs 1-5 (Hz) | swing height median / p90 | joint reversals | planted-foot slip |
+|---|---|---|---|---|---|---|
+| forward 10 cm/s | 10.0 → 10.0 | 10.0* → 6.6 cm | 0, 0, 0, 4.5, 0.5 → 1.5 ×5 | 0.6 / 0.7 → 1.9 / 2.7 cm | 13 → 6 /s | 10 → 5 cm/s |
+| forward 20 cm/s | 19.4 → 20.6 | 9.7* → 13.8 cm | 0, 0.25, 0, 5.0, 4.75 → 1.5 ×5 | 0.7 / 1.0 → 2.2 / 3.4 cm | 18 → 6 /s | 17 → 9 cm/s |
+| camera-first 15 cm/s | 14.8 → 15.3 | 3.5* → 10.2 cm | 8.8, 0.1, 0, 10.6, 1.4 → 1.5 ×5 | 0.5 / 0.7 → 2.0 / 2.9 cm | 23 → 5 /s | 15 → 6 cm/s |
+| sideways 15 cm/s | 14.7 → 15.5 | 6.1* → 10.3 cm | 0.6, 0.4, 0.1, 11, 0 → 1.5 ×5 | 0.5 / 0.7 → 2.0 / 3.0 cm | 17 → 6 /s | 16 → 7 cm/s |
+| stand | still → still | | | | 3.5 → 1.5 /s | |
+
+\* the old policy's "stride" is speed / mean step rate; with most legs not stepping it doesn't mean much. The old policy was also trained only up to 12 cm/s, so 15-20 cm/s is outside its range.
+
+**Still not perfect:** planted feet slip 5-9 cm/s, about half the old policy's. Feet lift 2-3.4 cm on flat ground, below the 3.5 cm target.
+
+Videos (close-ups follow the robot from the side; every command, one after another):
+
+| | |
+|---|---|
+| [old flat policy, close-up](media/training/gait0_old_flat.mp4), [its foot contacts](media/training/gait0_old_flat_contacts.png) | the skating |
+| [gait1](media/training/gait1.mp4), [contacts](media/training/gait1_contacts.png) | regular steps, leg 4 held up |
+| [gait2 at 43 M](media/training/gait2_43M_marching.mp4) | marching in place |
+| [gait3 at 72 M](media/training/gait3_72M_slow.mp4) | slow, short steps |
+| [**gait4**](media/training/gait4.mp4), [**contacts**](media/training/gait4_contacts.png) | the wave gait: every leg once per cycle, two non-adjacent legs up at a time |
+| [gait4 training: step 0](media/training/gait4_step000M.mp4), [29 M](media/training/gait4_step029M.mp4), [100 M](media/training/gait4_step100M_final.mp4), [dashboard](media/training/gait4_dashboard_final.mp4) | tracking-camera clips, 10 and 20 cm/s forward, sideways, turning |
