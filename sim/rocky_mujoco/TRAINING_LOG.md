@@ -251,8 +251,28 @@ Videos:
 
 | | |
 |---|---|
-| [**blind vs teacher vs student on the same stair pit**](media/training/compare_stairs_L3.mp4) | `compare_stairs.py`, level 3 (2.7 cm risers), same start and heading, side view. Of 8 headings, blind gets out 0, teacher 3, student 5 (a small sample; the 128-run eval gives 2 / 43 / 33 %). In the clip the blind policy climbs 3 cm and stalls; teacher and student climb 7 and 9 cm and walk out |
+| [blind vs teacher vs student on the same stair pit](media/training/compare_stairs_L3.mp4) | `compare_stairs.py`, level 3 (2.7 cm risers), same start and heading, side view. Of 8 headings, blind gets out 0, teacher 5, student 5 (a small sample; the 128-run eval gives 2 / 43 / 33 %). The shown robots rise 4 / 7 / 7 cm over 0.9 / 1.3 / 1.3 m, i.e. they scrape up two or three 2.7 cm steps. **From the side view this is hard to see, and it is not convincing stair climbing** (see the gait problems below) |
 | [student, step 0](media/training/student_step000M.mp4) | random student weights |
 | [student, 18 M](media/training/student_step018M.mp4) | |
 | [student, 60 M final](media/training/student_step060M_final.mp4) | the showcase tiles, camera-first |
 | [dashboard at 40 M](media/training/student_dashboard_040M.mp4), [dashboard at the end](media/training/student_dashboard_final.mp4) | for the student the curve is reward on its own rollouts |
+
+### Problem found by watching the videos: the gait is poor, and "climbing" is scraping
+
+Prompted by the user watching `compare_stairs_L3.mp4` ("it's not climbing the stairs at all, the way it's walking is really weird and looks inefficient and slow"). Measured from the same rollouts (foot positions vs the terrain under them, 15 s at 10 cm/s):
+
+| | blind | teacher | student |
+|---|---|---|---|
+| speed (commanded 10 cm/s) | 7.6 cm/s | 9.4 cm/s | 9.5 cm/s |
+| stride length | 2.5 cm | 2.6 cm | 2.5 cm |
+| steps per leg in 15 s (legs 1-5) | 43 64 48 28 44 | 57 14 12 116 72 | 70 6 10 130 72 |
+| median foot height in swing | 1.3 cm | 1.6 cm | 1.6 cm |
+| joint direction reversals per joint | 27 /s | 23 /s | 24 /s |
+
+- **Shuffling:** 2.5 cm strides at 3-4 steps a second instead of long, regular steps.
+- **Lopsided:** in the height-scan policies two legs hardly step (6-14 times in 15 s) and are dragged, while leg 4 paddles at ~8 Hz.
+- **Jitter:** the joints reverse direction ~24 times a second, a tremor rather than a gait.
+- **Feet barely lift:** the median swing height is 1.6 cm, below a 2.7 cm riser, so the robot gets up steps by scraping and pushing rather than stepping onto them. That is also why 4.3-6 cm risers fail.
+- **Slow by design, too:** commands only go up to 12 cm/s. The servos (5.5 rad/s no-load) allow more.
+
+**Cause:** the reward only asks for velocity tracking, staying upright and alive; the gait-shaping terms are tiny (`action_rate` -0.01, `torques` -0.002, `feet_air_time` +1.0 with a 0.2 s threshold). Nothing asks for regular, symmetric, high, smooth steps, so PPO found a jittery shuffle that tracks the velocity.
