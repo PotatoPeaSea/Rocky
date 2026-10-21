@@ -17,7 +17,17 @@ Differences from rocky_env.py (kept deliberately simple for MJX speed):
     covered >= 70 % of the commanded distance without falling, down if < 35 % or it fell, and respawns on a
     tile of that level. Body and leg collisions are on (capsules / cylinders, robot vs terrain); plate,
     dome or camera on the ground ends the episode, shin / link / belly hits are penalised. The critic
-    also sees a 7 x 7 grid of terrain heights around the robot; the policy stays blind.
+    also sees a 7 x 7 grid of terrain heights around the robot.
+  * scan (terrain="curriculum" only): what the POLICY sees of the terrain, a 13 x 13 grid at 6 cm
+    (+-0.36 m) around the base, aligned with the body yaw, value = base height above that ground point.
+      "none"   blind (step 2)
+      "true"   exact heights: the teacher (step 3)
+      "camera" what an OAK-D Lite height map would give: a cell has a value only if it was inside the
+               camera's view (73 x 58 deg, 0.2 - 3 m) at some point in the last 4 s (camera poses every
+               0.1 s), plus noise growing with viewing distance and a per-episode offset (pose drift);
+               a mask says which cells are known. The student (step 4); obs also carries
+               "teacher_state" (the teacher's input) for distillation.
+    With a scan the robot walks camera-first: commands point within +-45 deg of body -y (the camera).
 """
 import os
 from typing import Any, Dict, Optional, Union
@@ -31,6 +41,10 @@ from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def jnp_deg(d):
+    return d * jp.pi / 180.0
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -61,6 +75,13 @@ def default_config() -> config_dict.ConfigDict:
         # terrain="curriculum" only
         curriculum=config_dict.create(init_max_level=2, up_frac=0.7, down_frac=0.35, min_expected=0.4),
         terrain_scales=config_dict.create(base_height=0.0, orientation=-2.0, collision=-1.0, belly=-1.0),
+        scan="none",
+        scan_grid=config_dict.create(n=13, spacing=0.06),
+        # simulated camera height map: noise 4 mm + 4 mm per metre of viewing distance, per-episode offset
+        # 1 cm in height and 1 cm in xy (EKF drift over a few metres), memory 4 s
+        cam_map=config_dict.create(noise=0.004, noise_per_m=0.004, bias=0.01, xy_bias=0.01, hist=40, every=5,
+                                   min_range=0.2, max_range=3.0, hfov_deg=73.0, vfov_deg=58.0),
+        cam_command=config_dict.create(speed_min=0.03, speed_max=0.12, half_angle_deg=45.0, wz=0.3),
     )
 
 
@@ -118,6 +139,19 @@ class RockyJoystick(mjx_env.MjxEnv):
             self._hmap_info = (T.res, T.size_x, T.size_y, T.nx, T.ny)
             g = (np.arange(7) - 3) * 0.1
             self._scan = jp.array(np.stack(np.meshgrid(g, g), -1).reshape(-1, 2))
+        self._scan_mode = self._config.scan if self._curriculum else "none"
+        if self._scan_mode != "none":
+            sg = self._config.scan_grid
+            g = (np.arange(sg.n) - (sg.n - 1) / 2) * sg.spacing
+            self._pscan = jp.array(np.stack(np.meshgrid(g, g), -1).reshape(-1, 2))     # body-yaw frame xy
+            # camera mount in the base frame (OpenCV axes: x right, y down, z forward), from the CPU model
+            d0 = mujoco.MjData(m)
+            mujoco.mj_resetDataKeyframe(m, d0, key)
+            mujoco.mj_forward(m, d0)
+            cid = m.camera("oakd").id
+            Rb = d0.xmat[1].reshape(3, 3)
+            self._cam_p = jp.array(Rb.T @ (d0.cam_xpos[cid] - d0.xpos[1]))
+            self._cam_R = jp.array(Rb.T @ d0.cam_xmat[cid].reshape(3, 3) @ np.diag([1.0, -1.0, -1.0]))
 
     # ---------------- properties required by MjxEnv
     @property
@@ -138,6 +172,8 @@ class RockyJoystick(mjx_env.MjxEnv):
 
     # ---------------- helpers
     def _sample_cmd(self, rng):
+        if getattr(self, "_scan_mode", "none") != "none":
+            return self._sample_cam_cmd(rng)
         c = self._config.command
         k1, k2, k3 = jax.random.split(rng, 3)
         cmd = jax.random.uniform(k1, (3,), minval=-1.0, maxval=1.0) * jp.array([c.vx, c.vy, c.wz])
@@ -145,6 +181,55 @@ class RockyJoystick(mjx_env.MjxEnv):
         turn_only = jax.random.uniform(k3) < 0.25
         cmd = jp.where(turn_only, cmd * jp.array([0.0, 0.0, 1.0]), cmd)
         return jp.where(zero, jp.zeros(3), cmd)
+
+    def _sample_cam_cmd(self, rng):
+        """Camera-first commands: heading within +-half_angle of body -y, plus some turning."""
+        c = self._config.cam_command
+        k = jax.random.split(rng, 5)
+        th = jnp_deg(c.half_angle_deg) * jax.random.uniform(k[0], minval=-1.0, maxval=1.0)
+        sp = jax.random.uniform(k[1], minval=c.speed_min, maxval=c.speed_max)
+        wz = jax.random.uniform(k[2], minval=-c.wz, maxval=c.wz)
+        cmd = jp.array([sp * jp.sin(th), -sp * jp.cos(th), wz])
+        cmd = jp.where(jax.random.uniform(k[3]) < 0.1, cmd * jp.array([0.0, 0.0, 1.0]), cmd)
+        return jp.where(jax.random.uniform(k[4]) < 0.1, jp.zeros(3), cmd)
+
+    def _scan_world(self, data, xy_offset=None):
+        """World xy of the policy scan points (body-yaw aligned grid around the base)."""
+        R = data.xmat[1]
+        yaw = jp.arctan2(R[1, 0], R[0, 0])
+        c, s_ = jp.cos(yaw), jp.sin(yaw)
+        pts = data.qpos[0:2] + self._pscan @ jp.array([[c, s_], [-s_, c]])
+        return pts if xy_offset is None else pts + xy_offset
+
+    def _cam_pose(self, data):
+        R = data.xmat[1]
+        return data.qpos[0:3] + R @ self._cam_p, R @ self._cam_R
+
+    def _scan_obs(self, data, info, rng):
+        """(teacher scan, camera-map scan, known-mask); scans are base height above the ground there."""
+        pts = self._scan_world(data)
+        true = jp.clip(data.qpos[2] - self._ground(pts), -0.5, 0.5)
+        if self._scan_mode != "camera":
+            return true, None, None
+        cm = self._config.cam_map
+        pts_b = pts + info["map_bias"][0:2]                      # map built with a drifted pose estimate
+        P = jp.concatenate([pts_b, self._ground(pts_b)[:, None]], axis=1)          # (N, 3) world points
+        Xc = jp.einsum("kji,knj->kni", info["cam_R"], P[None] - info["cam_p"][:, None])   # (K, N, 3) cv frame
+        z = Xc[..., 2]
+        th, tv = jp.tan(jnp_deg(cm.hfov_deg) / 2), jp.tan(jnp_deg(cm.vfov_deg) / 2)
+        vis = (z > cm.min_range) & (z < cm.max_range) & (jp.abs(Xc[..., 0]) < th * z) & (jp.abs(Xc[..., 1]) < tv * z)
+        seen = jp.any(vis, axis=0)
+        dist = jp.min(jp.where(vis, z, 10.0), axis=0)
+        noise = (cm.noise + cm.noise_per_m * dist) * jax.random.normal(rng, true.shape)
+        meas = jp.clip(data.qpos[2] - P[:, 2] + info["map_bias"][2] + noise, -0.5, 0.5)
+        return true, jp.where(seen, meas, 0.0), seen.astype(jp.float32)
+
+    def _cam_hist_update(self, data, info, force=False):
+        p, R = self._cam_pose(data)
+        push = force | (info["ep_step"] % self._config.cam_map.every == 0)
+        hp = jp.where(push, jp.concatenate([p[None], info["cam_p"][:-1]], 0), info["cam_p"])
+        hR = jp.where(push, jp.concatenate([R[None], info["cam_R"][:-1]], 0), info["cam_R"])
+        return hp, hR
 
     def _ground(self, xy):
         """Terrain height (m) at world xy (..., 2), nearest heightfield cell."""
@@ -199,10 +284,20 @@ class RockyJoystick(mjx_env.MjxEnv):
             c, s_ = jp.cos(yaw), jp.sin(yaw)
             pts = data.qpos[0:2] + self._scan @ jp.array([[c, s_], [-s_, c]])
             privileged = jp.concatenate([privileged, jp.clip(data.qpos[2] - self._ground(pts), -0.5, 0.5)])
+        out = {}
+        if self._scan_mode != "none":
+            true, meas, mask = self._scan_obs(data, info, jax.random.fold_in(rng, 7))
+            privileged = jp.concatenate([privileged, true])
+            if self._scan_mode == "true":
+                state = jp.concatenate([state, true])
+            else:
+                out["teacher_state"] = jp.concatenate([state, true])
+                state = jp.concatenate([state, meas, mask])
         # an exploded env must never reach the shared observation normaliser: one NaN there poisons every
         # policy input and then the weights (mjx_terrain died this way at 202 M steps)
         clean = lambda x: jp.clip(jp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), -100.0, 100.0)
-        return {"state": clean(state), "privileged_state": clean(privileged)}
+        out.update({"state": clean(state), "privileged_state": clean(privileged)})
+        return {k: clean(v) for k, v in out.items()}
 
     # ---------------- API
     def reset(self, rng: jax.Array) -> mjx_env.State:
@@ -226,11 +321,20 @@ class RockyJoystick(mjx_env.MjxEnv):
             data, spawn = self._spawn(data, level, ttype, ks)
             data = mjx.forward(self.mjx_model, data)
             info.update(rng=rng, level=level, ttype=ttype, spawn=spawn, ep_step=0, respawn=jp.array(False))
+            if self._scan_mode == "camera":
+                info.update(self._fresh_map(data, ks))
         metrics = {f"reward/{k}": jp.zeros(()) for k in self._scales()}
         if self._curriculum:
             metrics["terrain/level"] = jp.zeros(())
         obs = self._obs(data, info, k4)
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
+
+    def _fresh_map(self, data, rng):
+        """New episode: camera history = the current pose only (nothing seen yet), new pose-drift offset."""
+        cm = self._config.cam_map
+        p, R = self._cam_pose(data)
+        b = jax.random.normal(rng, (3,)) * jp.array([cm.xy_bias, cm.xy_bias, cm.bias])
+        return {"cam_p": jp.tile(p[None], (cm.hist, 1)), "cam_R": jp.tile(R[None], (cm.hist, 1, 1)), "map_bias": b}
 
     def _scales(self):
         sc = dict(self._config.reward.scales)
@@ -251,6 +355,10 @@ class RockyJoystick(mjx_env.MjxEnv):
             info["spawn"] = jp.where(info["respawn"], spawn, info["spawn"])
             info["ep_step"] = jp.where(info["respawn"], 0, info["ep_step"])
             info["command"] = jp.where(info["respawn"], self._sample_cmd(k_cmd), info["command"])
+            if self._scan_mode == "camera":
+                fresh = self._fresh_map(data, k_sp)
+                for kk, v in fresh.items():
+                    info[kk] = jp.where(info["respawn"], v, info[kk])
             info["respawn"] = jp.array(False)
         target = jp.clip(self._q_stand + cfg.action_scale * action, self._lo, self._hi)
         data = mjx_env.step(self.mjx_model, data, target, self.n_substeps)
@@ -315,6 +423,8 @@ class RockyJoystick(mjx_env.MjxEnv):
             info["level"] = jp.where(end, nl, info["level"])
             info["ttype"] = jp.where(end, jax.random.randint(k_obs, (), 0, len(self._terrain.types)), info["ttype"])
             info["respawn"] = end
+            if self._scan_mode == "camera":
+                info["cam_p"], info["cam_R"] = self._cam_hist_update(data, info)
         obs = self._obs(data, info, k_obs)
         metrics = dict(state.metrics)          # keep keys added by wrappers
         metrics.update({f"reward/{k}": terms[k] for k in terms})

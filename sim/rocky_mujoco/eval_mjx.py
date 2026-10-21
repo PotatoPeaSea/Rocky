@@ -43,6 +43,7 @@ def load(run, terrain=None):
     cfg = R.default_config()
     cfg.impl = args["impl"]
     cfg.est_obs = args.get("est_obs", False)
+    cfg.scan = args.get("scan", "none")
     cfg.naconmax = 3072 * (64 if terrain == "curriculum" else 10)   # contacts for all eval envs (one batch)
     cfg.njmax = 4 * (64 if terrain == "curriculum" else 10) + 16
     env = R.RockyJoystick(terrain=terrain, config=cfg)
@@ -55,14 +56,19 @@ def load(run, terrain=None):
     # privileged input is longer (terrain scan) -> trim it to the size the saved normaliser expects
     n_priv = params[0].mean["privileged_state"].shape[-1]
     obs_shape["privileged_state"] = (n_priv,)
+    obs_shape = {k: obs_shape[k] for k in params[0].mean.keys()}
     nets = ppo_networks.make_ppo_networks(
         obs_shape, env.action_size, preprocess_observations_fn=running_statistics.normalize,
         policy_hidden_layer_sizes=(256, 128, 128), value_hidden_layer_sizes=(256, 256, 128),
         policy_obs_key="state", value_obs_key="privileged_state")
     pol = ppo_networks.make_inference_fn(nets)(params, deterministic=True)
 
+    keys = list(params[0].mean.keys())          # e.g. drop "teacher_state", which only the distiller uses
+
     def policy(obs, k):
-        return pol(dict(obs, privileged_state=obs["privileged_state"][..., :n_priv]), k)
+        o = {kk: obs[kk] for kk in keys}
+        o["privileged_state"] = o["privileged_state"][..., :n_priv]
+        return pol(o, k)
     return env, policy, args, p
 
 
@@ -133,12 +139,12 @@ def eval_flat(env, policy, n=256, seconds=10.0):
     return out
 
 
-def eval_terrain(env, policy, levels=(0, 3, 6, 9), n=128, seconds=15.0, speed=0.10):
+def eval_terrain(env, policy, levels=(0, 3, 6, 9), n=128, seconds=15.0, speed=0.10, sign=1.0):
     steps = int(seconds / env.dt)
     T = env._terrain
     cells = [(lv, ti) for ti in range(len(T.types)) for lv in levels]
     tiles = np.repeat(cells, n, axis=0)
-    cmds = np.tile([0.0, speed, 0.0], (len(tiles), 1))
+    cmds = np.tile([0.0, sign * speed, 0.0], (len(tiles), 1))
     _, _, _, dist, alive = (np.asarray(x) for x in rollout(env, policy, cmds, tiles, steps=steps))
     out = {}
     print(f"{'terrain':11s} " + " ".join(f"{'L' + str(l):>12s}" for l in levels) + "   (success %, falls %)")
@@ -158,6 +164,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run")
     ap.add_argument("--terrain", action="store_true", help="also score each terrain type and level")
+    ap.add_argument("--dir", default=None, choices=["+y", "-y"],
+                    help="terrain walking direction (default: -y = camera-first for scan policies, else +y)")
     a = ap.parse_args()
     run = os.path.abspath(a.run)
     env, policy, args, path = load(run, "curriculum" if a.terrain else None)
@@ -166,8 +174,10 @@ def main():
     if not a.terrain:
         res["flat"] = eval_flat(env, policy)
     if a.terrain:
-        res["terrain"] = eval_terrain(env, policy)
-    out = os.path.join(run, "eval_terrain.json" if a.terrain else "eval.json")
+        d = a.dir or ("-y" if args.get("scan", "none") != "none" else "+y")
+        res["terrain_dir"] = d
+        res["terrain"] = eval_terrain(env, policy, sign=-1.0 if d == "-y" else 1.0)
+    out = os.path.join(run, (f"eval_terrain{dict(zip(['+y', '-y'], ['_posy', '_negy'])).get(a.dir, '')}.json") if a.terrain else "eval.json")
     json.dump(res, open(out, "w"), indent=1)
     print("wrote", out)
 

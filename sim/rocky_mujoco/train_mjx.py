@@ -44,6 +44,8 @@ VIDEO_CMDS = [(3.0, (0.0, 0.08, 0.0), "forward 8 cm/s (toward leg 1)", None),
 TERRAIN_VIDEO_CMDS = [(5.0, (0.0, 0.10, 0.0), "rocks up to 5 cm (level 9)", ("rough", 9)),
                       (6.0, (0.0, 0.10, 0.0), "climbing 4.3 cm stairs (level 6)", ("stairs_dn", 6)),
                       (5.0, (0.0, 0.10, 0.0), "blocks up to 3.3 cm (level 5)", ("blocks", 5))]
+# perceptive runs walk camera-first (body -y)
+TERRAIN_VIDEO_CMDS_CAM = [(d, (c[0], -c[1], c[2]), lab + ", camera-first", t) for d, c, lab, t in TERRAIN_VIDEO_CMDS]
 
 
 class VideoRecorder:
@@ -73,6 +75,8 @@ class VideoRecorder:
                 lv, tt = jp.int32(tile[1]), jp.int32(self.env._terrain.types.index(tile[0]))
                 data, spawn = self.env._spawn(state.data, lv, tt, jax.random.PRNGKey(7))
                 state.info.update(level=lv, ttype=tt, spawn=spawn, ep_step=jp.int32(0), respawn=jp.array(False))
+                if "cam_p" in state.info:           # camera map starts empty on the new tile
+                    state.info.update(self.env._fresh_map(data, jax.random.PRNGKey(8)))
                 state = state.replace(data=data)
             for _ in range(int(dur / self.env.dt)):
                 state.info["command"] = jp.array(cmd)
@@ -107,6 +111,8 @@ def main():
                     help="curriculum = rocky_terrain.py rocks / slopes / stairs / blocks with levels (needs --impl warp)")
     ap.add_argument("--name", default="mjx_rocky")
     ap.add_argument("--no-dr", action="store_true")
+    ap.add_argument("--scan", default="none", choices=["none", "true", "camera"],
+                    help="terrain heights in the policy input: none (blind), true (teacher), camera (simulated OAK-D map)")
     ap.add_argument("--est-obs", action="store_true",
                     help="policy also sees the (noisy) Kalman-filter body velocity + height, like rocky_env estimator=ekf")
     ap.add_argument("--smoke", action="store_true", help="tiny run (CPU ok) to test the pipeline")
@@ -121,6 +127,7 @@ def main():
     cfg = R.default_config()
     cfg.impl = a.impl
     cfg.est_obs = a.est_obs
+    cfg.scan = a.scan
     # Warp allocates contacts in ONE pool for all envs of a batch; when it runs out, the envs that come last
     # silently lose contacts and fall through the ground (seen on the terrain with 24 / env, so 64 / env:
     # contacts are cheap). njmax (constraint rows per env) is what costs memory: the solver keeps
@@ -155,7 +162,7 @@ def main():
     holder = {}
     recorder = None if a.no_video else VideoRecorder(
         eval_env, holder, os.path.join(out, "videos"),
-        TERRAIN_VIDEO_CMDS if a.terrain == "curriculum" else VIDEO_CMDS)
+        (TERRAIN_VIDEO_CMDS_CAM if a.scan != "none" else TERRAIN_VIDEO_CMDS) if a.terrain == "curriculum" else VIDEO_CMDS)
 
     def checkpoint(step, make_policy, params):        # brax: once before training (step 0) and after every eval
         finite = all(bool(np.all(np.isfinite(np.asarray(x)))) for x in jax.tree_util.tree_leaves(params)
