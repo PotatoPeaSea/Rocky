@@ -35,17 +35,27 @@ import rocky_mjx_env as R
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Every progress video runs the same command script, so clips from different checkpoints compare directly.
-VIDEO_CMDS = [(3.0, (0.0, 0.08, 0.0), "forward 8 cm/s (toward leg 1)"),
-              (3.0, (0.08, 0.0, 0.0), "sideways 8 cm/s"),
-              (3.0, (0.0, 0.0, 0.4), "turn 0.4 rad/s")]
+# (seconds, command (vx, vy, wz), caption, tile (terrain type, level) or None = keep going where it is)
+VIDEO_CMDS = [(3.0, (0.0, 0.08, 0.0), "forward 8 cm/s (toward leg 1)", None),
+              (3.0, (0.08, 0.0, 0.0), "sideways 8 cm/s", None),
+              (3.0, (0.0, 0.0, 0.4), "turn 0.4 rad/s", None)]
+# terrain runs: the same three showcase tiles in every clip, walking off the spawn pad at 10 cm/s
+TERRAIN_VIDEO_CMDS = [(5.0, (0.0, 0.10, 0.0), "rocks up to 5 cm (level 9)", ("rough", 9)),
+                      (6.0, (0.0, 0.10, 0.0), "climbing 4.3 cm stairs (level 6)", ("stairs_dn", 6)),
+                      (5.0, (0.0, 0.10, 0.0), "blocks up to 3.3 cm (level 5)", ("blocks", 5))]
 
 
 class VideoRecorder:
     """Rolls out the current deterministic policy on the eval env and writes an MP4 with a caption.
     reset / step / policy are jitted once; params are an argument, so later checkpoints don't recompile."""
 
-    def __init__(self, env, make_policy_fn_holder, folder):
-        self.env, self.folder = env, folder
+    def __init__(self, env, make_policy_fn_holder, folder, segments=VIDEO_CMDS):
+        self.env, self.folder, self.segments = env, folder, segments
+        self.render_model = None
+        tiles = [seg[3] for seg in segments if seg[3] is not None]
+        if tiles:                                   # draw only the showcase tiles (see build_render_model)
+            import rocky_terrain
+            self.render_model = rocky_terrain.build_render_model(env._terrain, tiles)
         self.reset, self.step = jax.jit(env.reset), jax.jit(env.step)
         self.holder = make_policy_fn_holder
         self.policy = jax.jit(lambda p, obs, k: self.holder["make_policy"](p, deterministic=True)(obs, k)[0])
@@ -57,14 +67,23 @@ class VideoRecorder:
         t0 = time.time()
         state = self.reset(jax.random.PRNGKey(1))
         traj, labels, rng = [], [], jax.random.PRNGKey(2)
-        for dur, cmd, label in VIDEO_CMDS:
+        for dur, cmd, label, tile in self.segments:
+            if tile is not None:                    # put the robot on the showcase tile, fixed heading
+                lv, tt = jp.int32(tile[1]), jp.int32(self.env._terrain.types.index(tile[0]))
+                data, spawn = self.env._spawn(state.data, lv, tt, jax.random.PRNGKey(7))
+                state.info.update(level=lv, ttype=tt, spawn=spawn, ep_step=jp.int32(0), respawn=jp.array(False))
+                state = state.replace(data=data)
             for _ in range(int(dur / self.env.dt)):
                 state.info["command"] = jp.array(cmd)
                 rng, k = jax.random.split(rng)
                 state = self.step(state, self.policy(params, state.obs, k))
                 traj.append(state)
                 labels.append(label)
-        frames = self.env.render(traj[::2], height=360, width=640, camera="track")
+        if self.render_model is not None:
+            from mujoco_playground._src import mjx_env as _mjx_env
+            frames = _mjx_env.render_array(self.render_model, traj[::2], height=360, width=640, camera="track")
+        else:
+            frames = self.env.render(traj[::2], height=360, width=640, camera="track")
         out = []
         for img, label in zip(frames, labels[::2]):
             im = Image.fromarray(np.asarray(img))
@@ -83,7 +102,8 @@ def main():
     ap.add_argument("--num-timesteps", type=int, default=100_000_000)
     ap.add_argument("--num-envs", type=int, default=4096)
     ap.add_argument("--impl", default="jax", choices=["jax", "warp"])
-    ap.add_argument("--terrain", default="flat")
+    ap.add_argument("--terrain", default="flat", choices=["flat", "rough", "curriculum"],
+                    help="curriculum = rocky_terrain.py rocks / slopes / stairs / blocks with levels (needs --impl warp)")
     ap.add_argument("--name", default="mjx_rocky")
     ap.add_argument("--no-dr", action="store_true")
     ap.add_argument("--est-obs", action="store_true",
@@ -100,8 +120,20 @@ def main():
     cfg = R.default_config()
     cfg.impl = a.impl
     cfg.est_obs = a.est_obs
+    # Warp allocates contacts in ONE pool for all envs of a batch; when it runs out, the envs that come last
+    # silently lose contacts and fall through the ground (seen on the terrain with 24 / env, so 64 / env:
+    # contacts are cheap). njmax (constraint rows per env) is what costs memory: the solver keeps
+    # njmax^2 floats per env, and 208 rows x 4096 envs (+ an eval env sized like the training batch)
+    # overflowed the 12 GB GPU, after which WSL pages GPU memory to RAM and training stalls.
+    per_env = 64 if a.terrain == "curriculum" else 10
+    num_eval_envs = 8 if a.smoke else 128
+    cfg.naconmax = per_env * a.num_envs
+    cfg.njmax = 160 if a.terrain == "curriculum" else 56
     env = R.RockyJoystick(terrain=a.terrain, config=cfg)
-    eval_env = R.RockyJoystick(terrain=a.terrain, config=cfg)
+    ecfg = R.default_config()
+    ecfg.update(cfg.to_dict())
+    ecfg.naconmax = per_env * num_eval_envs
+    eval_env = R.RockyJoystick(terrain=a.terrain, config=ecfg)
 
     net = functools.partial(ppo_networks.make_ppo_networks,
                             policy_hidden_layer_sizes=(256, 128, 128), value_hidden_layer_sizes=(256, 256, 128),
@@ -120,7 +152,9 @@ def main():
             w.writerows(rows)
 
     holder = {}
-    recorder = None if a.no_video else VideoRecorder(eval_env, holder, os.path.join(out, "videos"))
+    recorder = None if a.no_video else VideoRecorder(
+        eval_env, holder, os.path.join(out, "videos"),
+        TERRAIN_VIDEO_CMDS if a.terrain == "curriculum" else VIDEO_CMDS)
 
     def checkpoint(step, make_policy, params):        # brax: once before training (step 0) and after every eval
         with open(os.path.join(out, "params_latest.pkl"), "wb") as f:
@@ -141,7 +175,7 @@ def main():
         environment=env, eval_env=eval_env, wrap_env_fn=wrapper.wrap_for_brax_training,
         randomization_fn=None if a.no_dr else R.domain_randomize,
         num_timesteps=a.num_timesteps, num_envs=a.num_envs, episode_length=cfg.episode_length,
-        num_evals=2 if small else a.num_evals, num_eval_envs=8 if small else 128,
+        num_evals=2 if small else a.num_evals, num_eval_envs=num_eval_envs,
         unroll_length=20, batch_size=16 if small else 256, num_minibatches=2 if small else 32,
         num_updates_per_batch=4, discounting=0.97, learning_rate=3e-4, entropy_cost=1e-2,
         normalize_observations=True, reward_scaling=1.0, max_grad_norm=1.0, clipping_epsilon=0.2,
