@@ -7,7 +7,8 @@
     python train_mjx.py --impl warp ...                # MuJoCo Warp backend (newer GPUs, faster)
     python train_mjx.py --smoke                        # tiny CPU run to check everything compiles
 
-Writes runs/<name>/params.pkl, params_latest.pkl (every eval), progress.csv (every eval), config.json,
+Writes runs/<name>/params.pkl, params_latest.pkl (last finite checkpoint), checkpoints/params_step_*.pkl
+(every eval), progress.csv (every eval), config.json,
 and runs/<name>/videos/step_XXXXXXXk.mp4: a 9 s clip (forward, sideways, turn) of the policy at step 0,
 at every eval and at the end, so you can watch it improve (--num-evals sets how many).
 """
@@ -116,7 +117,7 @@ def main():
         a.num_timesteps, a.num_envs = 20_000, 32
 
     out = os.path.join(HERE, "runs", a.name)
-    os.makedirs(out, exist_ok=True)
+    os.makedirs(os.path.join(out, "checkpoints"), exist_ok=True)
     cfg = R.default_config()
     cfg.impl = a.impl
     cfg.est_obs = a.est_obs
@@ -157,6 +158,15 @@ def main():
         TERRAIN_VIDEO_CMDS if a.terrain == "curriculum" else VIDEO_CMDS)
 
     def checkpoint(step, make_policy, params):        # brax: once before training (step 0) and after every eval
+        finite = all(bool(np.all(np.isfinite(np.asarray(x)))) for x in jax.tree_util.tree_leaves(params)
+                     if np.asarray(x).dtype.kind == "f")
+        name = f"params_step_{step // 1000:07d}k.pkl"     # keep every checkpoint, not just the latest
+        with open(os.path.join(out, "checkpoints", name), "wb") as f:
+            pickle.dump(params, f)
+        if not finite:          # never let a diverged checkpoint replace the last good one
+            print(f"WARNING: non-finite parameters at step {step}; params_latest.pkl keeps the last good one",
+                  flush=True)
+            return
         with open(os.path.join(out, "params_latest.pkl"), "wb") as f:
             pickle.dump(params, f)
         if recorder is not None:

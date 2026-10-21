@@ -68,11 +68,13 @@ Videos:
 - Walking blind on flat-ground training, Rocky handles small rocks and gentle downhill. It cannot climb, which needs lifting feet onto higher ground, and it mostly just stalls (few falls) when it can't progress.
 - **Measurement bug fixed along the way:** a first version of this table showed blocks failing 100 % even on flat level-0 tiles. Warp shares one contact buffer across all envs in a batch; when it overflowed, the last envs (the blocks column) lost their ground contacts and fell through. The eval and training budgets are now 64 contacts per env.
 
-## Step 2: blind rough-terrain policy with a curriculum: `runs/mjx_terrain` (running)
+## Step 2: blind rough-terrain policy with a curriculum: `runs/mjx_terrain2`
 
 ```
-train_mjx.py --num-timesteps 200000000 --num-envs 4096 --terrain curriculum --impl warp --est-obs --num-evals 20 --name mjx_terrain
+train_mjx.py --num-timesteps 120000000 --num-envs 4096 --terrain curriculum --impl warp --est-obs --num-evals 12 --name mjx_terrain2
 ```
+
+120 M steps in 1 h 53 min, at ~17 k env steps/s using 10.8 of 12 GB.
 
 **Terrain** (`rocky_terrain.py`, overview in `media/terrain_overview.png`): one 24 × 40 m heightfield made of 4 m tiles.
 - 6 terrain types × 10 difficulty levels: rocks, both pyramids (slope up and down), both stair pyramids (1 → 6 cm risers, 30 cm treads), and blocks.
@@ -102,8 +104,50 @@ train_mjx.py --num-timesteps 200000000 --num-envs 4096 --terrain curriculum --im
 | The solver hit MuJoCo's default 100-iteration cap on the terrain | Capped at 10 iterations / 20 line-search iterations, as GPU sims usually do |
 | Warp's overflow warnings are GPU printfs, some per env per step | Switched off |
 | Contact buffer overflow (above) | 64 contacts per env |
-| GPU memory overflowed at 4096 envs: the solver keeps (constraint rows)² floats per env, and the eval env had been sized like the training batch | Rows capped at 160 per env; eval env sized for its 128 envs. The run now uses 10.8 of 12 GB at ~15 k env steps/s |
+| GPU memory overflowed at 4096 envs: the solver keeps (constraint rows)² floats per env, and the eval env had been sized like the training batch | Rows capped at 160 per env; eval env sized for its 128 envs |
+| **First 200 M-step attempt (`runs/mjx_terrain_diverged`) diverged at 202 M steps.** Training reward had plateaued at ~57 from 100 M. Then one simulated robot blew up, and its NaN observations went into the shared observation normaliser and the loss: every policy and value weight became NaN, and Brax crashed. Only the latest checkpoint was kept, so the last good one (192 M) had already been overwritten | NaN guards: an env whose state is non-finite or whose joint speeds exceed 100 rad/s ends and resets, and observations and rewards are scrubbed of NaN/inf. Every checkpoint is now kept (`checkpoints/params_step_*.pkl`), and a non-finite one never replaces `params_latest.pkl`. Re-ran for 120 M steps, since the plateau starts at ~100 M; no NaN warnings |
+
+Eval reward (step: reward): 0: 8.2 · 11 M: 26.8 · 22 M: 41.9 · 44 M: 53.4 · 66 M: 56.2 · 99 M: 57.8 · 121 M: 57.6.
+
+### Result: blind terrain policy vs the flat policy
+
+`eval_mjx.py runs/mjx_terrain2 --terrain` (`runs/mjx_terrain2/eval_terrain.json`). Each cell is success %, flat policy → terrain policy; terrain-policy falls are in brackets when not 0.
+
+| Terrain | L0 | L3 | L6 | L9 |
+|---|---|---|---|---|
+| rocks (1 → 5 cm) | 100 → 100 | 98 → 100 | 70 → **100** | 18 → **98** |
+| slope up, walking down (0 → 15°) | 100 → 100 | 99 → 100 | 91 → 100 | 82 → 67 (1 % falls) |
+| slope down, climbing out | 100 → 100 | 86 → 100 | 6 → **62** | 0 → 0 |
+| stairs, walking down (1 → 6 cm risers) | 88 → 100 | 25 → **100** | 0 → **48** | 0 → 3 (2 % falls) |
+| stairs, climbing out (1 → 6 cm risers) | 66 → **100** | 0 → 0 | 0 → 1 | 0 → 0 (9 % falls) |
+| blocks (0 → 6 cm) | 100 → 100 | 69 → **100** | 52 → 73 | 12 → 30 |
+
+**What improved:**
+- **Rocks are solved:** 98 % success on 5 cm rocks (level 9), up from 18 %.
+- **Downhill:** walking down 2.7 cm stairs (level 3) goes from 25 % to 100 %, and down 4.3 cm stairs from 0 % to 48 %.
+- **Climbing out of slope pits:** up to 10° (level 6), 62 % from 6 %.
+- **Blocks:** 100 % up to 2 cm, and 73 % at 3.3 cm.
+- **It almost never falls:** when the terrain policy can't make progress, it stalls rather than tipping over.
+
+**What it still can't do: climb stairs.**
+- It manages 1 cm risers (level 0) but 0 % at 2.7 cm (level 3), where it gets about 0.6 m before stalling.
+- This is a known limit of blind policies. A foot that hits a riser feels like any other obstacle, and the policy has no way to know a step is coming or to lift its feet higher in advance.
+- The likely fixes are to give the policy the terrain ahead (step 2 of the perception plan: the OAK-D height map, through a teacher-student setup), or to add a reward for swing-foot clearance.
+
+**Regressions and oddities:**
+- **Steep downhill:** 15° downhill (level 9) dropped from 82 % to 67 %. The new policy walks more cautiously, which costs distance on the steepest slope.
+- **Stair-pit numbers:** the 9 % falls in the level-9 stair pit, and its mean distance of 3.6 m, come from a few robots tumbling down the 30 cm deep pyramid.
+
+**Caveats:**
+- These numbers are in the GPU simulation: only the feet and the capsule approximations collide, with at most one contact per capsule. There's no encoder quantisation, latency or backlash, and the solver is capped at 10 iterations.
+- The CPU env (`rocky_env.py`, with the real EKF and camera in the loop) can't load these GPU policies yet, so they haven't been checked there.
 
 Videos:
-- [step 0 (untrained, on the three showcase tiles)](media/training/terrain_step000M.mp4)
-- More to be added as checkpoints arrive.
+
+| | |
+|---|---|
+| [step 0, untrained](media/training/terrain_step000M.mp4) | eval reward 8.2 |
+| [22 M](media/training/terrain_step022M.mp4) | eval reward 41.9 |
+| [55 M](media/training/terrain_step055M.mp4) | eval reward 55.3, near the plateau |
+| [120 M, final](media/training/terrain_step120M_final.mp4) | eval reward 57.6. The middle segment is climbing 4.3 cm stairs (level 6), where the eval gives 1 % success |
+| [dashboard at 40 M](media/training/terrain_dashboard_040M.mp4), [dashboard at the end](media/training/terrain_dashboard_final.mp4) | clip and reward curve together |

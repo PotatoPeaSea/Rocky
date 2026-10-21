@@ -75,6 +75,8 @@ def main():
     def poll():
         vids = sorted(glob.glob(os.path.join(run, "videos", "step_*.mp4")))
         st["videos"] = vids
+        if st["idx"] is not None and st["idx"] >= len(vids):     # run folder moved or cleaned
+            st["idx"], st["frames"], st["follow"] = None, None, True
         # follow the newest clip; retried every poll until it loads (a clip < 3 s old may still be written)
         if st["follow"] and vids and st.get("loaded") != (vids[-1], os.path.getmtime(vids[-1]))                 and time.time() - os.path.getmtime(vids[-1]) > 3:
             load(len(vids) - 1)

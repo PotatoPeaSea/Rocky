@@ -199,7 +199,10 @@ class RockyJoystick(mjx_env.MjxEnv):
             c, s_ = jp.cos(yaw), jp.sin(yaw)
             pts = data.qpos[0:2] + self._scan @ jp.array([[c, s_], [-s_, c]])
             privileged = jp.concatenate([privileged, jp.clip(data.qpos[2] - self._ground(pts), -0.5, 0.5)])
-        return {"state": state, "privileged_state": privileged}
+        # an exploded env must never reach the shared observation normaliser: one NaN there poisons every
+        # policy input and then the weights (mjx_terrain died this way at 202 M steps)
+        clean = lambda x: jp.clip(jp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), -100.0, 100.0)
+        return {"state": clean(state), "privileged_state": clean(privileged)}
 
     # ---------------- API
     def reset(self, rng: jax.Array) -> mjx_env.State:
@@ -264,7 +267,8 @@ class RockyJoystick(mjx_env.MjxEnv):
         q = data.qpos[7:]
         out = jp.clip(self._lo + 0.05 - q, 0.0) + jp.clip(q - (self._hi - 0.05), 0.0)
         height = self._height(data)
-        done = (-grav[2] < 0.5) | (height < 0.03) | jp.any(jp.isnan(data.qpos))
+        blown = ~jp.all(jp.isfinite(data.qpos)) | ~jp.all(jp.isfinite(data.qvel)) | jp.any(jp.abs(data.qvel) > 100.0)
+        done = (-grav[2] < 0.5) | (height < 0.03) | blown
         if self._curriculum:
             done = done | jp.any(data.sensordata[self._fatal_adr] > 0)
         terms = {
@@ -285,6 +289,8 @@ class RockyJoystick(mjx_env.MjxEnv):
             terms["collision"] = jp.sum(data.sensordata[self._leg_hit_adr] > 0).astype(jp.float32)
             terms["belly"] = (data.sensordata[self._belly_adr] > 0).astype(jp.float32)
         scales = self._scales()
+        terms = {k: jp.where(blown, 0.0, jp.nan_to_num(v)) for k, v in terms.items()}
+        terms["termination"] = done.astype(jp.float32)
         reward = sum(scales[k] * terms[k] for k in terms) * self.dt
 
         info["feet_air_time"] = air * ~contact
