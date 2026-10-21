@@ -36,7 +36,7 @@ FLAT_CMDS = [("forward +y 8 cm/s", (0.0, 0.08, 0.0)), ("back -y 8 cm/s", (0.0, -
              ("fast +y 12 cm/s", (0.0, 0.12, 0.0)), ("turn 0.4 rad/s", (0.0, 0.0, 0.4)), ("stand", (0.0, 0.0, 0.0))]
 
 
-def load(run, terrain=None):
+def load(run, terrain=None, n_envs=3072):
     cfgj = json.load(open(os.path.join(run, "config.json")))
     args = cfgj["args"]
     terrain = terrain or args["terrain"]
@@ -44,7 +44,7 @@ def load(run, terrain=None):
     cfg.impl = args["impl"]
     cfg.est_obs = args.get("est_obs", False)
     cfg.scan = args.get("scan", "none")
-    cfg.naconmax = 3072 * (64 if terrain == "curriculum" else 10)   # contacts for all eval envs (one batch)
+    cfg.naconmax = n_envs * (64 if terrain == "curriculum" else 10)   # contacts for all eval envs (one batch)
     cfg.njmax = 4 * (64 if terrain == "curriculum" else 10) + 16
     env = R.RockyJoystick(terrain=terrain, config=cfg)
     p = os.path.join(run, "params.pkl")

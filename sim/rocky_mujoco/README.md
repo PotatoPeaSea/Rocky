@@ -22,7 +22,11 @@ This is a MuJoCo model of Rocky (5 legs × 3 HX-30HM servos) built from the v5 F
 | `train_ppo.py` / `play_policy.py` | SB3 PPO on the CPU, then view or evaluate a policy. |
 | `rocky_mjx_env.py` / `train_mjx.py` | MuJoCo Playground-style JAX env and Brax PPO for the GPU. |
 | `rocky_estimator.py` | **Robot side.** Error-state Kalman filter: IMU + servo encoders (leg odometry) + depth camera. numpy only. |
-| `rocky_vision.py` | **Robot side.** Depth-camera measurements: ground-plane fit and RGB-D visual odometry (numpy + OpenCV). |
+| `rocky_vision.py` | **Robot side.** Depth-camera measurements: ground-plane fit, RGB-D visual odometry (numpy + OpenCV), and `ElevationMap`, the terrain height scan the stair-climbing policy reads. |
+| `rocky_terrain.py` | Terrain curriculum heightfield (rocks, slopes, stairs, blocks; 10 levels). |
+| `eval_mjx.py` | Scores a GPU policy: flat velocity tracking, or success per terrain type and level (`--terrain`, `--dir=-y` to walk camera-first). |
+| `distill_mjx.py` | Teacher-student (DAgger): a policy on the simulated OAK-D height map learns from one trained on exact heights. |
+| `elevation_demo.py` / `compare_stairs.py` | Height map vs ground truth on the CPU; side-by-side stair-climbing video of several policies. |
 | `rocky_sensors.py` | Sim only: OAK-D Lite depth render with stereo noise, BNO085 noise and bias. |
 | `estimate_demo.py` | Estimator benchmark against ground truth: IMU only vs IMU + legs vs IMU + legs + camera. |
 | `verify_model.py` | Model sanity checks: mass, limits, FK, 10 s stand, drop and thrash test. |
@@ -201,6 +205,7 @@ wsl -d Ubuntu -- bash /mnt/c/Users/smart/Documents/Pentapod/rocky/sim/rocky_mujo
   - **`videos/step_XXXXXXXk.mp4`**: a 9 s clip with the tracking camera and a fixed command script (forward, sideways, turn). One is recorded before training starts, one after each of the `--num-evals` evals, and one at the end.
 - **Live window**: `wsl -d Ubuntu -- bash .../wsl_watch.sh runs/<name>` shows the newest clip looping plus the eval-reward curve and ETA, and updates at every checkpoint. Left/right keys browse older clips; End goes back to the newest. It runs inside WSL (drawn by WSLg) because Windows can run out of RAM during training; `python watch_training.py` works the same on Windows. Add `--record out.mp4` to save one loop of the window.
 - `wsl_record_dashboard.sh runs/<name> 100 200` saves those window recordings automatically when the run passes 100 M and 200 M steps, and when it finishes.
+- **Training history, scores and videos of every step** (flat, blind terrain, height-scan teacher, camera-map student) are in [`TRAINING_LOG.md`](TRAINING_LOG.md). Terrain runs: `--terrain curriculum` (Warp backend), `--scan true` for the teacher, then `distill_mjx.py --teacher runs/<teacher>` for the student.
 - `--est-obs` gives the policy the Kalman-filter body velocity and height (true value + the measured estimator error), the same 4 inputs as `RockyEnv(estimator="ekf")`.
 - Measured on the RTX 3060 (2026-10-20), 4096 envs, JAX backend: **~7 k env steps/s** including evals (5.9 M steps in 18 min). 100 M steps is about 4 h.
 

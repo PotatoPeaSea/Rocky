@@ -151,3 +151,108 @@ Videos:
 | [55 M](media/training/terrain_step055M.mp4) | eval reward 55.3, near the plateau |
 | [120 M, final](media/training/terrain_step120M_final.mp4) | eval reward 57.6. The middle segment is climbing 4.3 cm stairs (level 6), where the eval gives 1 % success |
 | [dashboard at 40 M](media/training/terrain_dashboard_040M.mp4), [dashboard at the end](media/training/terrain_dashboard_final.mp4) | clip and reward curve together |
+
+## Step 3: teacher policy that sees the terrain heights: `runs/mjx_teacher`
+
+```
+train_mjx.py --num-timesteps 120000000 --num-envs 4096 --terrain curriculum --impl warp --est-obs --scan true --num-evals 12 --name mjx_teacher
+```
+
+120 M steps in 1 h 56 min. Same terrain, curriculum, rewards and collisions as step 2. The differences:
+
+- **Height scan in the observation (`--scan true`):** a 13 × 13 grid of points 6 cm apart (72 × 72 cm around the body, turning with the body's heading). Each point gives the base's height above the exact terrain there. This is "perfect perception": the teacher of step 4.
+- **Commands are camera-first:** the walking direction is within ±45° of body −y, the side the OAK-D faces. The camera can only map ground it can see, so the student in step 4 must walk that way, and the teacher is trained the same way for a like-for-like comparison.
+
+Eval reward (step: reward): 0: 8.7 · 11 M: 27.7 · 22 M: 44.6 · 33 M: 50.7 · 44 M: 52.7 · 55 M: 54.6 · 77 M: 55.3 · 99 M: 55.7 · 121 M: 55.2.
+The reward plateaus where the blind run's did. Most of the course is terrain the blind policy already handled, so the reward can't show the difference; the per-terrain eval below does.
+
+### Result: blind vs teacher, both walking camera-first
+
+`eval_mjx.py <run> --terrain --dir=-y` (`eval_terrain_negy.json` in each run). Unlike the step-2 table, both policies walk towards body −y here, so the tiles and directions are identical. Success %, blind → teacher; teacher falls in brackets when not 0.
+
+| Terrain | L0 | L3 | L6 | L9 |
+|---|---|---|---|---|
+| rocks (1 → 5 cm) | 100 → 100 | 100 → 100 | 100 → 100 | 99 → 99 |
+| slope up, walking down (0 → 15°) | 100 → 100 | 100 → 100 | 100 → 100 | 100 → 99 |
+| slope down, climbing out | 100 → 100 | 100 → 100 | 69 → **100** | 12 → **99** |
+| stairs, walking down (1 → 6 cm risers) | 100 → 100 | 100 → 100 | 73 → **96** | 17 → 29 (5 % falls) |
+| stairs, climbing out (1 → 6 cm risers) | 100 → 100 | 2 → **43** | 2 → 9 | 1 → 1 |
+| blocks (0 → 6 cm) | 100 → 100 | 100 → 100 | 91 → 89 | 46 → **74** |
+
+**What the height scan buys:**
+- **First real stair climbing:** 43 % up 2.7 cm risers (level 3), where the blind policy gets 2 %.
+- **Climbing out of slope pits:** 99 % at 15° (level 9), up from 12 %.
+- **Walking down stairs:** 96 % on 4.3 cm risers (level 6), up from 73 %.
+- **High blocks:** 74 % at 6 cm (level 9), up from 46 %.
+
+**Still not solved:** climbing 4.3 cm and 6 cm risers (levels 6 and 9): 9 % and 1 %. The risers are 20–30 % of the leg's reach, and the policy has to lift each foot over them. Ideas for later: a swing-foot clearance reward, more stair tiles in the curriculum, a longer run.
+
+Videos:
+
+| | |
+|---|---|
+| [step 0, untrained](media/training/teacher_step000M.mp4) | |
+| [22 M](media/training/teacher_step022M.mp4) | eval reward 44.6 |
+| [55 M](media/training/teacher_step055M.mp4) | eval reward 54.6 |
+| [120 M, final](media/training/teacher_step120M_final.mp4) | same three showcase tiles as step 2 (5 cm rocks, 4.3 cm stairs, 3.3 cm blocks), walking camera-first |
+| [dashboard at 40 M](media/training/teacher_dashboard_040M.mp4), [dashboard at the end](media/training/teacher_dashboard_final.mp4) | |
+
+## Step 4: student policy on the simulated OAK-D height map: `runs/mjx_student`
+
+```
+distill_mjx.py --teacher runs/mjx_teacher --name mjx_student --num-steps 60000000 --num-envs 1024 --unroll 40
+```
+
+60 M steps in 70 min at ~14 k env steps/s.
+
+**What the student sees (`scan=camera`):** the same 13 × 13 grid, but as the camera would map it.
+- **Only seen cells:** a cell counts as known only if it was inside the OAK-D's field of view (73 × 58°, 0.2–3 m) from one of the last 40 camera poses (one every 5 steps, so the last 4 s).
+- **Unseen cells:** read 0, and a second 169-value mask says which cells are known.
+- **Errors:** known cells get noise growing with range (4 mm + 4 mm per metre) and a per-episode offset (1 cm in height, 1 cm sideways), standing in for drift of the estimator's pose.
+- At spawn only the camera side of the grid is known; the rest fills in as the robot walks.
+
+**Training (DAgger distillation):** no reward is involved.
+- The student drives the robot. The teacher, which sees the exact heights, labels every visited state with the action it would take.
+- The student is fitted to those labels (squared error on the action).
+- For the first 15 % of training the teacher drives a falling share of the envs, so the student sees good behaviour before its own mistakes.
+- Domain randomisation and the terrain curriculum are on, as in training.
+
+**Fixed along the way:** the first attempt (2048 envs) ran out of GPU memory after 25 iterations, because another process on the PC was holding ~5.8 GB of the GPU. Re-run with 1024 envs × 40 steps per iteration (the same 41 k samples per update).
+
+Imitation error (mean squared action difference; actions are in [−1, 1]): 0.12 at the start → 0.003 by 6 M steps, and 0.0015–0.003 to the end. Reward on the student's own rollouts was 54–58 per episode from 6 M steps on, the teacher's level.
+
+### Result: blind vs teacher vs student, all walking camera-first
+
+`eval_mjx.py <run> --terrain --dir=-y`. Success %, blind / teacher / **student**.
+
+| Terrain | L0 | L3 | L6 | L9 |
+|---|---|---|---|---|
+| rocks (1 → 5 cm) | 100 / 100 / **100** | 100 / 100 / **100** | 100 / 100 / **100** | 99 / 99 / **100** |
+| slope up, walking down (0 → 15°) | 100 / 100 / **100** | 100 / 100 / **100** | 100 / 100 / **100** | 100 / 99 / **98** |
+| slope down, climbing out | 100 / 100 / **100** | 100 / 100 / **100** | 69 / 100 / **100** | 12 / 99 / **91** |
+| stairs, walking down (1 → 6 cm risers) | 100 / 100 / **100** | 100 / 100 / **100** | 73 / 96 / **100** | 17 / 29 / **55** (2 % falls) |
+| stairs, climbing out (1 → 6 cm risers) | 100 / 100 / **100** | 2 / 43 / **33** | 2 / 9 / **12** | 1 / 1 / **0** |
+| blocks (0 → 6 cm) | 100 / 100 / **100** | 100 / 100 / **100** | 91 / 89 / **86** | 46 / 74 / **73** |
+
+**What carries over from the teacher:**
+- **Stair climbing with real perception:** 33 % up 2.7 cm risers (level 3), against 2 % blind. The teacher, with exact heights, gets 43 %.
+- **Slopes and blocks:** climbing out of the 15° pit drops only from 99 % to 91 %. 6 cm blocks hold at 73 %.
+- **Walking down stairs:** the student beats the teacher on the steepest descent (55 % vs 29 %).
+
+**Where it falls short:** climbing 4.3 cm and 6 cm risers stays unsolved (12 % and 0 %), as it was for the teacher. The student can only be as good as its teacher here, so that work goes on the teacher side.
+
+**The robot side of this map:** `rocky_vision.ElevationMap` (validated with `elevation_demo.py`, `media/elevation_map.png`) builds the same grid and mask from real depth frames and the estimator's pose. In that test its error (mean 2–4 mm, 95th percentile up to 24 mm on stair edges) is smaller than the noise the student was trained on (mean 9 mm, 95th percentile 21 mm).
+
+**Caveats:**
+- This is all in simulation, with the camera map simulated as noisy truth rather than rendered depth.
+- On the real robot `ElevationMap` replaces it, so its delay (the Pi's frame rate) and real stereo artefacts haven't been tested in the loop yet.
+
+Videos:
+
+| | |
+|---|---|
+| [**blind vs teacher vs student on the same stair pit**](media/training/compare_stairs_L3.mp4) | `compare_stairs.py`, level 3 (2.7 cm risers), same start and heading, side view. Of 8 headings, blind gets out 0, teacher 3, student 5 (a small sample; the 128-run eval gives 2 / 43 / 33 %). In the clip the blind policy climbs 3 cm and stalls; teacher and student climb 7 and 9 cm and walk out |
+| [student, step 0](media/training/student_step000M.mp4) | random student weights |
+| [student, 18 M](media/training/student_step018M.mp4) | |
+| [student, 60 M final](media/training/student_step060M_final.mp4) | the showcase tiles, camera-first |
+| [dashboard at 40 M](media/training/student_dashboard_040M.mp4), [dashboard at the end](media/training/student_dashboard_final.mp4) | for the student the curve is reward on its own rollouts |
