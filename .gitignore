@@ -13,6 +13,13 @@ logs/
 checkpoints/
 *.zip
 wandb/
+# Secrets / local config
+.env
+.env.*
+*.key
+*.pem
+# Git bundles (local remote snapshots)
+*.bundle
 # OS
 .DS_Store
 Thumbs.db
