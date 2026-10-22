@@ -277,6 +277,8 @@ Prompted by the user watching `compare_stairs_L3.mp4` ("it's not climbing the st
 
 **Cause:** the reward only asks for velocity tracking, staying upright and alive; the gait-shaping terms are tiny (`action_rate` -0.01, `torques` -0.002, `feet_air_time` +1.0 with a 0.2 s threshold). Nothing asks for regular, symmetric, high, smooth steps, so PPO found a jittery shuffle that tracks the velocity.
 
+**Fixed in steps 5-7:** a gait clock and gait-shaping rewards (step 5), then the teacher (step 6) and student (step 7) retrained with them. Climbing 4.3 cm stairs goes from 9-12 % to 80-84 %.
+
 ## Step 5: a real gait on flat ground: `runs/gait1` → `runs/gait4`
 
 Four 100 M-step flat runs (≈ 20 min each), each checked with **`gait_check.py`**. For one deterministic rollout per command (no randomisation), it measures speed, stride, step rate per leg, how evenly the legs share the work, swing-foot height, joint jitter and slip of planted feet. It also draws a foot-contact diagram and records a close-up side video that follows the robot.
@@ -380,3 +382,54 @@ Videos:
 | [**4.3 cm stairs, close-up**](media/training/teacher2_stairs43_closeup.mp4) | follow-cam from the side: the third segment ("camera-first 15 cm/s") shows feet lifted over each riser and placed on the next step. [Its foot contacts](media/training/teacher2_stairs43_contacts.png). [2.7 cm stairs close-up](media/training/teacher2_stairs27_closeup.mp4) |
 | [side-by-side, 2.7 cm pit](media/training/compare2_stairs_L3.mp4), [side-by-side, 4.3 cm pit](media/training/compare2_stairs_L6.mp4) | blind / old teacher / new teacher from the same start |
 | [training: step 0](media/training/teacher2_step000M.mp4), [120 M final](media/training/teacher2_step120M_final.mp4), [dashboard](media/training/teacher2_dashboard_final.mp4) | the usual three showcase tiles |
+
+## Step 7: camera-map student of the new teacher: `runs/mjx_student2`
+
+```
+distill_mjx.py --teacher runs/mjx_teacher2 --name mjx_student2 --num-steps 60000000 --num-envs 1024 --unroll 40
+```
+
+Same DAgger setup as step 4: the student sees only the simulated OAK-D height map, and the teacher is now `mjx_teacher2`. 60 M steps in 75 min. Imitation error 0.068 → 0.0012 by 6 M steps, then 0.002-0.0025 to the end.
+
+### Result: the student keeps the stair climbing
+
+`eval_mjx.py runs/mjx_student2 --terrain --dir=-y`. Success %, blind (step 2) / old student (step 4) / new teacher (step 6) / **new student**:
+
+| Terrain | L0 | L3 | L6 | L9 |
+|---|---|---|---|---|
+| rocks (1 → 5 cm) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 99 / 100 / 100 / **99** (1 % falls) |
+| slope up, walking down (0 → 15°) | 100 / 100 / 100 / **99** | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 100 / 98 / 82 / **94** |
+| slope down, climbing out | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 69 / 100 / 100 / **100** | 12 / 91 / 98 / **98** |
+| stairs, walking down (1 → 6 cm risers) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 73 / 100 / 95 / **98** | 17 / 55 / 43 / **55** (5 % falls) |
+| **stairs, climbing out (1 → 6 cm risers)** | 100 / 100 / 100 / **100** | 2 / 33 / 100 / **100** | 2 / 12 / 84 / **80** | 1 / 0 / 10 / **12** (3 % falls) |
+| blocks (0 → 6 cm) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 91 / 86 / 100 / **99** | 46 / 73 / 95 / **98** |
+
+- **Close to the teacher, using only the camera map:**
+  - stairs 100 / 80 / 12 % at 2.7 / 4.3 / 6 cm (teacher 100 / 84 / 10);
+  - 6 cm blocks 98 %.
+- **Better than the teacher on two downhill cells:** walking down a 15° slope (94 % vs 82) and 6 cm stairs (55 % vs 43).
+- **Against the step-4 student:** climbing 4.3 cm stairs goes from 12 % to 80 %. Side-by-side on the 4.3 cm pit (`compare_stairs.py`, 8 headings): blind 0/8, old student 1/8, **new student 7/8**. The new student's clip climbs 11.7 cm.
+
+`gait_check.py`, camera-first 15 cm/s:
+
+| | speed | stride | step rate, legs 1-5 | swing height median / p90 | joint reversals | planted-foot slip |
+|---|---|---|---|---|---|---|
+| new student, 4.3 cm stair pit | 13.2 cm/s | 7.2 cm | 1.4-2.25 Hz | 2.9 / 5.5 cm | 7 /s | 11 cm/s |
+| new student, flat tile | 14.5 cm/s | 9.1 cm | 1.5-1.75 Hz | 2.8 / 4.6 cm | 7 /s | 8.5 cm/s |
+| new teacher, flat tile | 14.3 cm/s | 9.2 cm | 1.5-1.6 Hz | 2.8 / 4.6 cm | 7 /s | 8.5 cm/s |
+
+**Limits of the stage-2 policies (teacher and student):**
+- **They only walk camera-first.** They were trained only within ±45° of the camera direction (body −y), because the camera can only map ground it sees. Commanded towards +y they barely move (≈1 cm/s), and sideways they manage 8-9 of 15 cm/s. To go somewhere else, Rocky has to turn to face it first (turning works).
+- **Marching in place:** on a zero command they step on the spot instead of standing still. The flat gait policy (step 5) stands still.
+- **Slip:** planted feet still slip 8-11 cm/s on these policies, more than the flat `gait4` (5-9).
+- **6 cm risers** (two-thirds of the body height) are still mostly out of reach: 12 %.
+- **Simulation only:** the camera map is simulated noisy truth. The robot-side `ElevationMap` hasn't been run in the loop with a policy yet.
+
+Videos:
+
+| | |
+|---|---|
+| [**new student, 4.3 cm stairs close-up**](media/training/student2_stairs43_closeup.mp4) | third segment (camera-first): feet over each riser, using only the simulated camera map |
+| [side-by-side on the 4.3 cm pit: blind / old student / new student](media/training/compare3_students_L6.mp4) | 0/8, 1/8, 7/8 headings out |
+| [new student, flat close-up](media/training/student2_flat_closeup.mp4) | all commands; only camera-first walks properly (see limits) |
+| [training: step 0](media/training/student2_step000M.mp4), [60 M final](media/training/student2_step060M_final.mp4), [dashboard](media/training/student2_dashboard_final.mp4) | |
