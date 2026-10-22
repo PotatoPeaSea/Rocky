@@ -330,3 +330,53 @@ Videos (close-ups follow the robot from the side; every command, one after anoth
 | [gait3 at 72 M](media/training/gait3_72M_slow.mp4) | slow, short steps |
 | [**gait4**](media/training/gait4.mp4), [**contacts**](media/training/gait4_contacts.png) | the wave gait: every leg once per cycle, two non-adjacent legs up at a time |
 | [gait4 training: step 0](media/training/gait4_step000M.mp4), [29 M](media/training/gait4_step029M.mp4), [100 M](media/training/gait4_step100M_final.mp4), [dashboard](media/training/gait4_dashboard_final.mp4) | tracking-camera clips, 10 and 20 cm/s forward, sideways, turning |
+
+## Step 6: height-scan teacher with the new gait: `runs/mjx_teacher2`
+
+```
+train_mjx.py --num-timesteps 120000000 --num-envs 4096 --terrain curriculum --impl warp --est-obs --scan true --num-evals 12 --name mjx_teacher2
+```
+
+**Setup:** the step-3 teacher's setup (exact 13 × 13 height scan, camera-first commands, terrain curriculum) with the step-5 gait reward. On terrain the swing-foot target is 5 cm, and camera-first commands now go up to 25 cm/s.
+
+120 M steps in 2 h 0 min (~16 k env steps/s). Eval reward (step: reward): 0: −63 · 11 M: 7 · 22 M: 40 · 33 M: 59 · 55 M: 73 · 66 M: 69 · 88 M: 73 · 121 M: 73. The rewards differ from step 3's, so the totals don't compare directly.
+
+### Result: stairs are climbed now
+
+`eval_mjx.py runs/mjx_teacher2 --terrain --dir=-y`, same course and rule as before (10 cm/s camera-first, 15 s, success = no fall and ≥ 70 % of the distance). Success %, blind (step 2) / old teacher (step 3) / old student (step 4) / **new teacher**:
+
+| Terrain | L0 | L3 | L6 | L9 |
+|---|---|---|---|---|
+| rocks (1 → 5 cm) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 99 / 99 / 100 / **100** |
+| slope up, walking down (0 → 15°) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 100 / 99 / 98 / **82** |
+| slope down, climbing out | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 69 / 100 / 100 / **100** | 12 / 99 / 91 / **98** |
+| stairs, walking down (1 → 6 cm risers) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 73 / 96 / 100 / **95** | 17 / 29 / 55 / **43** (2 % falls) |
+| **stairs, climbing out (1 → 6 cm risers)** | 100 / 100 / 100 / **100** | 2 / 43 / 33 / **100** | 2 / 9 / 12 / **84** | 1 / 1 / 0 / **10** (2 % falls) |
+| blocks (0 → 6 cm) | 100 / 100 / 100 / **100** | 100 / 100 / 100 / **100** | 91 / 89 / 86 / **100** | 46 / 74 / 73 / **95** |
+
+- **Stair climbing:**
+  - 2.7 cm risers go from 43 % to 100 %.
+  - 4.3 cm risers (about half the robot's 9 cm body height) go from 9 % to 84 %.
+  - 6 cm risers are still hard: 10 %.
+- **Blocks:** 95 % at 6 cm, up from 74 %.
+- **Regressions:**
+  - Walking down a 15° slope drops from 99 % to 82 %.
+  - Walking down 6 cm stairs is 43 %. That's better than the old teacher's 29 %, but below the old student's 55 %.
+- **Side-by-side (`compare_stairs.py`, 8 headings from the pit centre):**
+  - 2.7 cm stair pit: blind 0/8, old teacher 3/8, new teacher **8/8**.
+  - 4.3 cm stair pit: 0/8, 2/8, **7/8**. In the clip, the new teacher climbs 13 cm out of the 4.3 cm pit.
+
+`gait_check.py runs/mjx_teacher2 --tile stairs_dn 6` (on the 4.3 cm stair pit), camera-first 15 cm/s:
+- 13.6 cm/s, stride 7 cm, all five legs stepping 1.75-2.25 Hz (evenness 0.78);
+- swing feet lift 2.7 cm median, **5.3 cm** at the 90th percentile, so they go over the riser instead of scraping it;
+- 7 joint reversals/s, no fall.
+
+Commands that aren't camera-first (towards +y or sideways) barely move on the stairs. The height-scan policies were only trained within ±45° of the camera direction, so that's expected.
+
+Videos:
+
+| | |
+|---|---|
+| [**4.3 cm stairs, close-up**](media/training/teacher2_stairs43_closeup.mp4) | follow-cam from the side: the third segment ("camera-first 15 cm/s") shows feet lifted over each riser and placed on the next step. [Its foot contacts](media/training/teacher2_stairs43_contacts.png). [2.7 cm stairs close-up](media/training/teacher2_stairs27_closeup.mp4) |
+| [side-by-side, 2.7 cm pit](media/training/compare2_stairs_L3.mp4), [side-by-side, 4.3 cm pit](media/training/compare2_stairs_L6.mp4) | blind / old teacher / new teacher from the same start |
+| [training: step 0](media/training/teacher2_step000M.mp4), [120 M final](media/training/teacher2_step120M_final.mp4), [dashboard](media/training/teacher2_dashboard_final.mp4) | the usual three showcase tiles |

@@ -121,6 +121,9 @@ def main():
     import rocky_terrain
 
     run = os.path.join(HERE, a.run) if not os.path.isabs(a.run) else a.run
+    if not a.tile and json.load(open(os.path.join(run, "config.json")))["args"].get("scan", "none") != "none":
+        a.tile = ["slope_up", "0"]     # height-scan policies need the terrain env; slope level 0 is flat (0 deg)
+        print("height-scan policy: flat ground = slope_up level 0 tile")
     terrain = "curriculum" if a.tile else "flat"
     env, policy, _, _ = load(run, terrain, n_envs=len(CMDS))
     tile = None
